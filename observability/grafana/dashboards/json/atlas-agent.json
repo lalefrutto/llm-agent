@@ -1,0 +1,86 @@
+{
+  "title": "Atlas Agent",
+  "uid": "atlas-agent",
+  "tags": ["atlas", "llm-agent"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Запросы /chat (всего)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(agent_requests_total)", "legendFormat": "total"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
+    },
+    {
+      "id": 2, "type": "stat", "title": "Ошибки /chat",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(agent_requests_total{status=\"error\"}) or vector(0)", "legendFormat": "errors"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Заблокировано sandbox/file_ops",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(agent_sandbox_blocked_total) or vector(0)", "legendFormat": "blocked"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Невалидный JSON роутера / MAX_STEPS",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(agent_routing_invalid_json_total) or vector(0)", "legendFormat": "invalid_json"},
+        {"expr": "sum(agent_max_steps_reached_total) or vector(0)", "legendFormat": "max_steps"}
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Латентность LLM-вызовов по узлу графа (p95, s)",
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, node) (rate(agent_llm_latency_seconds_bucket[5m])))", "legendFormat": "{{node}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Латентность полного прохода графа (avg, s)",
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "rate(agent_graph_latency_seconds_sum[5m]) / rate(agent_graph_latency_seconds_count[5m])", "legendFormat": "avg graph latency"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 7, "type": "piechart", "title": "Решения роутера",
+      "gridPos": {"x": 0, "y": 13, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (action) (agent_route_decisions_total)", "legendFormat": "{{action}}"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "legend": {"displayMode": "table", "placement": "right"}}
+    },
+    {
+      "id": 8, "type": "piechart", "title": "Вердикты критика",
+      "gridPos": {"x": 8, "y": 13, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (verdict) (agent_critic_verdict_total)", "legendFormat": "{{verdict}}"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "legend": {"displayMode": "table", "placement": "right"}}
+    },
+    {
+      "id": 9, "type": "bargauge", "title": "Вызовы инструментов",
+      "gridPos": {"x": 16, "y": 13, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (tool, status) (agent_tool_calls_total)", "legendFormat": "{{tool}} / {{status}}"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "displayMode": "gradient", "orientation": "horizontal"}
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Токены/мин (prompt vs completion)",
+      "gridPos": {"x": 0, "y": 21, "w": 24, "h": 7},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (type) (rate(agent_tokens_total[5m])) * 60", "legendFormat": "{{type}}"}]
+    }
+  ]
+}

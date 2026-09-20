@@ -1,0 +1,219 @@
+# Раздел "Изоляция" ТЗ разобран подробно в docs/ТЗ_и_отчёт.docx.
+# Кратко реализованная схема:
+#   - agent-app: контейнер с логикой агента, БЕЗ доступа к docker.sock
+#     хоста напрямую (в проде — через отдельный exec-proxy с allowlist
+#     образов, а не голый DooD, который эквивалентен root на хосте).
+#   - exec-sandbox: НЕ постоянный сервис, а образ, поднимаемый per-call
+#     из agent/tools/code_exec.py как `docker run --rm --network none`.
+#     В ЭТОЙ (dev/защита) конфигурации agent-app получает docker.sock
+#     хоста напрямую (DooD) — иначе из контейнера нечем поднять sandbox.
+#     Это осознанное упрощение для одного пользователя на своей машине;
+#     в проде — exec-proxy с allowlist образов (см. отчёт, "Ограничения").
+#     Ужесточение (опционально, для прод-уровня): runtime: runsc (gVisor)
+#     вместо runc — доп. слой изоляции syscalls ценой ~10-20% оверхеда.
+#   - llm-engine (Ollama): отдельный контейнер с доступом к GPU хоста.
+#   - qdrant: векторное хранилище для Mem0.
+#   - observability stack: Langfuse (LLM-нативные трейсы) + стандартный
+#     стек (OTel Collector -> Prometheus/Loki -> Grafana -> Alertmanager).
+
+services:
+  agent-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.agent
+    ports:
+      - "8080:8080"
+    environment:
+      # Модели уже скачаны в нативный Ollama на хосте (см. README, шаг 1) —
+      # используем его вместо пустого контейнера llm-engine, чтобы не тянуть
+      # те же ~17GB весов ещё раз. host.docker.internal — спец. DNS-имя
+      # Docker Desktop для доступа к хосту из контейнера.
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - AGENT_DEFAULT_MODEL=hermes3:8b-llama3.1-q4_K_M  # primary по evals/results/model_comparison.md
+      - MEMORY_BACKEND=mem0   # без Qdrant падать громко, а не тихо уходить в LocalJSON
+      - QDRANT_URL=http://qdrant:6333
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - LANGFUSE_HOST=http://langfuse:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-atlas-local}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-atlas-local}
+      - AGENT_WORKSPACE=/workspace
+      - SANDBOX_WORKSPACE_VOLUME=docker_agent_workspace  # named volume ниже, как его видит docker-демон хоста
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-ddgs}
+      - CHECKPOINT_DB=/app/data/checkpoints.sqlite
+    volumes:
+      - agent_workspace:/workspace:rw
+      - agent_data:/app/data:rw
+      - //var/run/docker.sock:/var/run/docker.sock  # DooD для sandbox, см. комментарий выше
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+      langfuse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [agent_net]
+
+  llm-engine:
+    image: ollama/ollama:latest
+    ports:
+      - "11435:11434"  # проброшен на 11435, т.к. на хосте уже работает нативный Ollama (11434)
+    volumes:
+      - ollama_models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [agent_net]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # в образе qdrant нет curl/wget — используем bash /dev/tcp
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [agent_net]
+
+  # --- Observability: LLM-нативный слой ---
+  langfuse:
+    image: langfuse/langfuse:2
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=change-me
+      - NEXTAUTH_URL=http://localhost:3000
+      - SALT=change-me
+      - TELEMETRY_ENABLED=false
+      # Headless-инициализация: проект и API-ключи создаются при старте,
+      # чтобы agent-app мог писать трейсы без ручной настройки через UI.
+      # Логин в UI: atlas@example.com / atlas-password (валидация требует настоящий домен)
+      - LANGFUSE_INIT_ORG_ID=atlas-org
+      - LANGFUSE_INIT_ORG_NAME=Atlas
+      - LANGFUSE_INIT_PROJECT_ID=atlas-project
+      - LANGFUSE_INIT_PROJECT_NAME=atlas-agent
+      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-atlas-local}
+      - LANGFUSE_INIT_PROJECT_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-atlas-local}
+      - LANGFUSE_INIT_USER_EMAIL=atlas@example.com
+      - LANGFUSE_INIT_USER_NAME=atlas
+      - LANGFUSE_INIT_USER_PASSWORD=atlas-password
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$$(hostname):3000/api/public/health >/dev/null 2>&1 || exit 1"]  # next-server слушает IP контейнера, не localhost
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [agent_net]
+
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+      - POSTGRES_DB=langfuse
+    volumes:
+      - langfuse_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [agent_net]
+
+  # --- Observability: стандартный стек (metrics/logs/traces/alerts) ---
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ../observability/otel-collector-config.yaml:/etc/otelcol/config.yaml
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+    # distroless-образ без shell/wget — healthcheck через exec невозможен,
+    # состояние = "процесс жив" (см. docker compose ps: Up без health)
+    networks: [agent_net]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ../observability/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [agent_net]
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    # образ loki — без shell и wget, exec-healthcheck невозможен (как и у otel-collector);
+    # готовность проверяется снаружи: curl localhost:3100/ready
+    networks: [agent_net]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ../observability/grafana:/etc/grafana/provisioning
+    depends_on: [prometheus, loki]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [agent_net]
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    ports:
+      - "9093:9093"
+    volumes:
+      - ../observability/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [agent_net]
+
+volumes:
+  agent_workspace:
+  agent_data:
+  ollama_models:
+  qdrant_data:
+  langfuse_pg:
+
+networks:
+  agent_net:
+    driver: bridge

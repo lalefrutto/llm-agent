@@ -1,0 +1,44 @@
+groups:
+  - name: atlas-agent-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(agent_requests_total{status="error"}[5m]) / rate(agent_requests_total[5m]) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Доля ошибок агента > 5% за 5 минут"
+
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, rate(agent_request_duration_seconds_bucket[5m])) > 15
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "P95 латентность ответа агента > 15с"
+
+      - alert: SandboxEscapeAttempt
+        expr: increase(agent_sandbox_blocked_total[15m]) > 3
+        for: 0m
+        labels: {severity: critical}
+        annotations:
+          summary: "Более 3 заблокированных попыток выхода за пределы sandbox за 15 минут"
+
+      - alert: RoutingFallbackSpike
+        expr: increase(agent_routing_invalid_json_total[15m]) > 10
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "Модель часто не возвращает валидный JSON маршрутизации — возможна деградация модели/промпта"
+
+      - alert: MaxStepsHitFrequently
+        expr: rate(agent_max_steps_reached_total[15m]) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: ">10% запросов упираются в MAX_STEPS — возможны циклы делегирования"
+
+      - alert: TokenCostSpike
+        expr: rate(agent_llm_tokens_total[1h]) > 5 * rate(agent_llm_tokens_total[1h] offset 1d)
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Расход токенов за час в 5 раз выше, чем сутки назад в то же время"

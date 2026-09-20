@@ -1,0 +1,16 @@
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=1.0.0
+openai>=1.30.0
+mem0ai>=0.1.0
+ollama>=0.4.0
+qdrant-client>=1.9.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pyyaml>=6.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp>=1.24.0
+langfuse>=2.30.0,<3  # SDK v3+ шлёт OTel в /api/public/otel, которого нет у сервера langfuse:2
+pytest>=8.0.0
+prometheus-client>=0.20.0
+ddgs>=9.0.0
+python-docx>=1.1.0

@@ -1,0 +1,17 @@
+  t01 [routing] — 8.0s
+  t02 [routing] — 25.2s
+  t03 [routing] — 9.4s
+  t06 [memory_correctness] — 17.9s
+  t07 [critic_catch] — 3.7s
+  t08 [task_success] — 41.1s
+  t09 [step_efficiency] — 6.5s
+  t10 [hallucination] — 6.1s
+
+=== Итог: 10/10 пройдено ===
+  critic_catch         1/1
+  guardrail            2/2
+  hallucination        1/1
+  memory_correctness   1/1
+  routing              3/3
+  step_efficiency      1/1
+  task_success         1/1

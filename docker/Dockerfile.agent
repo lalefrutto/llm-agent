@@ -1,0 +1,29 @@
+# Контейнер основного приложения агента (оркестратор + под-агенты).
+# В dev-конфигурации получает docker.sock хоста (DooD) и статический
+# docker CLI, чтобы поднимать exec-sandbox per-call; в проде вместо
+# этого — exec-proxy (см. docker-compose.yml, комментарий про DooD).
+FROM python:3.11-slim
+
+ARG DOCKER_CLI_VERSION=27.5.1
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+       | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 agent
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY agent/ ./agent/
+COPY memory/ ./memory/
+COPY prompts/ ./prompts/
+COPY identity/ ./identity/
+COPY skills/ ./skills/
+COPY config/ ./config/
+
+RUN mkdir -p /app/data && chown -R agent:agent /app
+# USER agent  # в dev-режиме нужен root ради /var/run/docker.sock (DooD); в проде — вернуть non-root + exec-proxy
+EXPOSE 8080
+CMD ["uvicorn", "agent.main:app", "--host", "0.0.0.0", "--port", "8080"]

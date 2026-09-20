@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Атлас — чат</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1e21; --muted:#6b7280; --accent:#2563eb; --user:#dbeafe; --bot:#f3f4f6; --border:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --card:#171a21; --ink:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; --user:#1e3a5f; --bot:#22262e; --border:#2a2f3a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  header small { color:var(--muted); }
+  header code { background:var(--bot); padding:2px 6px; border-radius:4px; }
+  main { max-width:860px; margin:0 auto; padding:16px; }
+  #log { display:flex; flex-direction:column; gap:10px; min-height:50vh; }
+  .msg { padding:10px 14px; border-radius:12px; max-width:85%; white-space:pre-wrap; word-wrap:break-word; }
+  .user { align-self:flex-end; background:var(--user); }
+  .bot { align-self:flex-start; background:var(--bot); }
+  .meta { font-size:12px; color:var(--muted); margin-top:6px; }
+  .meta b { color:var(--accent); font-weight:600; }
+  form { display:flex; gap:8px; margin-top:16px; padding:8px 0; }
+  input, button { font:inherit; }
+  input { flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--ink); }
+  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .sys { font-size:12px; color:var(--muted); text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Атлас — мультиагентный ассистент</h1>
+  <small>user_id: <code id="uid"></code> · thread: <code id="tid">новый</code></small>
+  <small><a href="/metrics" target="_blank">/metrics</a> · <a href="http://localhost:3000" target="_blank">Langfuse</a> · <a href="http://localhost:3001" target="_blank">Grafana</a></small>
+</header>
+<main>
+  <div id="log"><div class="sys">Спросите что-нибудь. Арифметика уйдёт в executor (sandbox), новости — в researcher (web_search), факты о вас — в память (Mem0/Qdrant).</div></div>
+  <form id="f">
+    <input id="q" autocomplete="off" placeholder="Сообщение…" required>
+    <button id="send" type="submit">Отправить</button>
+    <button id="reset" type="button" title="Новый thread (долгосрочная память сохраняется)">Новый тред</button>
+  </form>
+</main>
+<script>
+  const log = document.getElementById('log'), q = document.getElementById('q'), send = document.getElementById('send');
+  let userId = 'demo_user', threadId = null;
+  try { userId = localStorage.getItem('atlas_user') || userId; threadId = localStorage.getItem('atlas_thread'); } catch (e) {}
+  document.getElementById('uid').textContent = userId;
+  document.getElementById('tid').textContent = threadId || 'новый';
+  function add(cls, text, meta) {
+    const d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text;
+    if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.innerHTML = meta; d.appendChild(m); }
+    log.appendChild(d); d.scrollIntoView({behavior:'smooth', block:'end'}); return d;
+  }
+  document.getElementById('reset').onclick = () => { threadId = null; try { localStorage.removeItem('atlas_thread'); } catch (e) {}
+    document.getElementById('tid').textContent = 'новый'; add('sys', '— новый тред —'); };
+  document.getElementById('f').onsubmit = async (ev) => {
+    ev.preventDefault(); const text = q.value.trim(); if (!text) return;
+    add('user', text); q.value = ''; send.disabled = true;
+    const pending = add('bot', '…думаю (роутер → под-агенты → финализация)');
+    try {
+      const r = await fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({user_id:userId, thread_id:threadId, message:text})});
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.statusText);
+      threadId = j.thread_id; try { localStorage.setItem('atlas_thread', threadId); } catch (e) {}
+      document.getElementById('tid').textContent = threadId.slice(0, 8);
+      pending.textContent = j.answer;
+      const meta = document.createElement('div'); meta.className = 'meta';
+      meta.innerHTML = 'route: <b>' + (j.route_history || []).join(' → ') + '</b> · steps: ' + j.step_count + ' · ' + j.latency_s + 's';
+      pending.appendChild(meta);
+    } catch (e) { pending.textContent = 'Ошибка: ' + e.message; }
+    finally { send.disabled = false; q.focus(); }
+  };
+</script>
+</body>
+</html>

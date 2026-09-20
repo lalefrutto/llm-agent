@@ -1,0 +1,16 @@
+# Образ для эфемерной песочницы выполнения кода (exec-sandbox).
+# Запускается per-call через `docker run --rm --network none` из
+# agent/tools/code_exec.py — контейнер не живёт постоянно.
+FROM python:3.11-slim
+
+RUN useradd -m -u 1000 sandboxuser \
+    && pip install --no-cache-dir numpy pandas matplotlib \
+    && rm -rf /root/.cache
+
+# Минимальный набор библиотек для анализа данных (skill data-analysis).
+# Намеренно НЕ ставим сетевые библиотеки/requests — обращение в сеть
+# и так исключено через --network none, но снижаем и саму возможность
+# случайно на неё сослаться.
+
+USER sandboxuser
+WORKDIR /workspace

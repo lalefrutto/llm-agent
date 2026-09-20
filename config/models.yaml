@@ -1,0 +1,67 @@
+# Кандидаты для локального инференса, протестированные под задачу
+# агента. Все запускаются через Ollama (OpenAI-compatible API,
+# http://localhost:11434/v1). Актуальные результаты тестов — в
+# evals/results/model_comparison.md после прогона на вашем железе
+# (см. README.md, шаг 4).
+#
+# Целевое железо для этого проекта: NVIDIA GPU, 8GB+ VRAM.
+
+models:
+  - id: qwen2.5:7b-instruct-q4_K_M
+    role: comparison         # был primary до прогона; см. role_assignment ниже
+    params_b: 7
+    quantization: Q4_K_M
+    approx_vram_gb: 5.5
+    why_considered: >
+      Сильный tool-calling "из коробки", хорошее соотношение
+      качество/размер, нативная поддержка длинного контекста (128k),
+      активно используется как база для агентных бенчмарков.
+
+  - id: llama3.1:8b-instruct-q4_K_M
+    role: comparison
+    params_b: 8
+    quantization: Q4_K_M
+    approx_vram_gb: 6.0
+    why_considered: >
+      Широко используемый baseline, хорошая инструктивность, удобно
+      для сравнения "мейнстримной" модели с более специализированными
+      кандидатами.
+
+  - id: hermes3:8b-llama3.1-q4_K_M
+    role: primary            # по результатам evals/results/model_comparison.md
+    params_b: 8
+    quantization: Q4_K_M
+    approx_vram_gb: 6.0
+    why_considered: >
+      Файнтюн Llama-3.1 от Nous Research, специально дообучен под
+      function-calling/агентные сценарии и структурированный вывод —
+      прямой конкурент Qwen2.5 по нашей ключевой метрике (tool use).
+
+  - id: phi3.5:3.8b-mini-instruct-q4_K_M
+    role: latency_baseline
+    params_b: 3.8
+    quantization: Q4_K_M
+    approx_vram_gb: 3.0
+    why_considered: >
+      Контрольная точка "маленькой" модели — проверить, где проходит
+      граница качество/скорость на нашем железе и есть ли смысл
+      использовать её для дешёвых under-the-hood вызовов (например,
+      решения ADD/UPDATE в memory_manager.py) вместо основной модели.
+
+# Роли под-агентов -> модель. Читается в agent/graph.py (_model_for) и
+# memory/memory_manager.py (Mem0 LLM); AGENT_DEFAULT_MODEL — fallback.
+#
+# Итог реального прогона (evals/results/model_comparison.md, 2026-09-20):
+# hermes3 — 1.00 по рубрике инструктивности, 3/3 routing, 3/3 tool-calling,
+# та же скорость, что у qwen2.5 (3.0 vs 3.4 с avg). qwen2.5 дрейфует в
+# китайский язык (2 кейса из 11) и не делегирует арифметику executor'у.
+# Замер переключения моделей на 8 GB VRAM: 5-7 с на каждый swap (в памяти
+# живёт одна модель) — поэтому ВСЕ роли на одной резидентной модели.
+# Разводить критика на другую модель (снижение correlated errors) имеет
+# смысл только при VRAM >= 12 GB, когда обе модели резидентны.
+role_assignment:
+  orchestrator: hermes3:8b-llama3.1-q4_K_M
+  researcher: hermes3:8b-llama3.1-q4_K_M
+  executor: hermes3:8b-llama3.1-q4_K_M
+  critic: hermes3:8b-llama3.1-q4_K_M      # альтернатива при >=12GB VRAM: qwen2.5:7b-instruct-q4_K_M
+  memory_extraction: hermes3:8b-llama3.1-q4_K_M  # phi3.5 отвергнута: нет tools в Ollama-шаблоне, JSON 80%
