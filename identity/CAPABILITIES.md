@@ -11,7 +11,7 @@
 - Выполнять код Python в изолированном контейнере
   (`agent/tools/code_exec.py`).
 - Делегировать подзадачи специализированным под-агентам
-  (Researcher, Executor, Critic/Verifier — см. `agent/nodes/`).
+  (Researcher, Executor, Critic/Verifier — узлы графа в `agent/graph.py`).
 - Применять навыки (skills) из каталога `skills/` для повторяемых
   типов задач.
 

@@ -65,6 +65,11 @@ def file_read(path: str) -> str:
     return target.read_text(encoding="utf-8")
 
 
+def exists(path: str) -> bool:
+    """Есть ли файл (для запрета перезаписи без подтверждения, см. graph._dispatch_tool)."""
+    return _safe_resolve(path).exists()
+
+
 def file_write(path: str, content: str) -> bool:
     target = _safe_resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -29,7 +29,7 @@ services:
       # те же ~17GB весов ещё раз. host.docker.internal — спец. DNS-имя
       # Docker Desktop для доступа к хосту из контейнера.
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-      - AGENT_DEFAULT_MODEL=hermes3:8b-llama3.1-q4_K_M  # primary по evals/results/model_comparison.md
+      - AGENT_DEFAULT_MODEL=atlas-hermes3-12k  # hermes3 (primary по evals/results/model_comparison.md) с num_ctx=12k
       - MEMORY_BACKEND=mem0   # без Qdrant падать громко, а не тихо уходить в LocalJSON
       - QDRANT_URL=http://qdrant:6333
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
@@ -142,6 +142,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 10
+      start_period: 180s  # после аварийной остановки Docker postgres делает fsync всего каталога — минуты
     networks: [agent_net]
 
   # --- Observability: стандартный стек (metrics/logs/traces/alerts) ---

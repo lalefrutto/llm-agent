@@ -8,6 +8,8 @@
 winget install Ollama.Ollama
 ollama pull hermes3:8b-llama3.1-q4_K_M
 ollama pull nomic-embed-text
+# hermes3 с контекстом 12k вместо дефолтных 4k — её используют все роли агента
+ollama create atlas-hermes3-12k -f config/ollama/hermes3-12k.Modelfile
 ```
 
 Для сравнения моделей (`evals/compare_models.py`) дополнительно:
@@ -55,16 +57,19 @@ curl -X POST http://localhost:8080/chat -H "Content-Type: application/json" `
   -d '{"user_id":"u1","message":"Посчитай 18% от 4500"}'
 ```
 
-## 5. Evals
+## 5. Тесты и evals
 
 ```powershell
+# детерминированная часть (без Ollama/Docker): guardrails, skills, логика графа
+pytest tests/ -q
+
 # сравнение моделей -> evals/results/model_comparison.md
 python evals/compare_models.py
 
 # оценка агентной системы (нужны запущенные Ollama и docker compose)
 $env:MEMORY_BACKEND="mem0"
 $env:SANDBOX_WORKSPACE_VOLUME="docker_agent_workspace"
-python evals/run_evals.py --dataset evals/dataset.jsonl --live
+python evals/run_evals.py --dataset evals/dataset.jsonl --live --repeats 5
 ```
 
 ## Переменные окружения
@@ -72,7 +77,7 @@ python evals/run_evals.py --dataset evals/dataset.jsonl --live
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | адрес Ollama |
-| `AGENT_DEFAULT_MODEL` | `hermes3:8b-llama3.1-q4_K_M` | модель по умолчанию; роли — `config/models.yaml` |
+| `AGENT_DEFAULT_MODEL` | `atlas-hermes3-12k` | модель по умолчанию; роли — `config/models.yaml` |
 | `AGENT_MODEL_OVERRIDE` | — | одна модель на все роли |
 | `MEMORY_BACKEND` | `auto` | `mem0` / `local` |
 | `QDRANT_URL` | `http://localhost:6333` | |

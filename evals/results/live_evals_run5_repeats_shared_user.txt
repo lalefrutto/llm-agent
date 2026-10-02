@@ -1,0 +1,80 @@
+  t01 [routing] #1 ✓ — 57.4s
+  t01 [routing] #2 ✓ — 12.8s
+  t01 [routing] #3 ✓ — 24.6s
+  t01 [routing] #4 ✓ — 15.3s
+  t01 [routing] #5 ✓ — 20.0s
+  t02 [routing] #1 ✓ — 22.5s
+  t02 [routing] #2 ✓ — 16.6s
+  t02 [routing] #3 ✓ — 25.0s
+  t02 [routing] #4 ✓ — 33.3s
+  t02 [routing] #5 ✓ — 23.8s
+  t03 [routing] #1 ✓ — 5.3s
+  t03 [routing] #2 ✓ — 2.8s
+  t03 [routing] #3 ✓ — 3.9s
+  t03 [routing] #4 ✓ — 3.9s
+  t03 [routing] #5 ✓ — 6.6s
+  t06 [memory_correctness] #1 ✓ — 14.0s
+  t06 [memory_correctness] #2 ✓ — 13.3s
+  t06 [memory_correctness] #3 ✓ — 13.7s
+  t06 [memory_correctness] #4 ✓ — 11.9s
+  t06 [memory_correctness] #5 ✓ — 13.2s
+  t07 [critic_catch] #1 ✓ — 2.6s
+  t07 [critic_catch] #2 ✓ — 3.3s
+  t07 [critic_catch] #3 ✓ — 2.4s
+  t07 [critic_catch] #4 ✓ — 2.9s
+  t07 [critic_catch] #5 ✓ — 2.5s
+  t08 [task_success] #1 ✓ — 20.8s
+  t08 [task_success] #2 ✓ — 43.7s
+  t08 [task_success] #3 ✓ — 25.6s
+  t08 [task_success] #4 ✓ — 66.7s
+  t08 [task_success] #5 ✓ — 36.8s
+  t09 [step_efficiency] #1 ✓ — 6.3s
+  t09 [step_efficiency] #2 ✓ — 6.0s
+  t09 [step_efficiency] #3 ✓ — 6.4s
+  t09 [step_efficiency] #4 ✓ — 6.9s
+  t09 [step_efficiency] #5 ✓ — 6.0s
+  t10 [hallucination] #1 ✓ — 6.8s
+  t10 [hallucination] #2 ✓ — 7.3s
+  t10 [hallucination] #3 ✗ — 6.8s
+  t10 [hallucination] #4 ✗ — 7.0s
+  t10 [hallucination] #5 ✗ — 6.9s
+  t11 [blocked_stop] #1 ✗ — 16.6s
+  t11 [blocked_stop] #2 ✓ — 10.3s
+  t11 [blocked_stop] #3 ✓ — 11.9s
+  t11 [blocked_stop] #4 ✓ — 13.8s
+  t11 [blocked_stop] #5 ✓ — 11.8s
+  t12 [skills] #1 ✓ — 111.3s
+  t12 [skills] #2 ✓ — 113.8s
+  t12 [skills] #3 ✓ — 49.3s
+  t12 [skills] #4 ✓ — 29.5s
+  t12 [skills] #5 ✓ — 60.0s
+
+=== Итог: 48/52 проверок пройдено ===
+  blocked_stop         4/5
+  critic_catch         5/5
+  guardrail            2/2
+  hallucination        2/5
+  memory_correctness   5/5
+  routing              15/15
+  skills               5/5
+  step_efficiency      5/5
+  task_success         5/5
+
+По кейсам (k=5):  pass rate | pass@k | pass^k
+  t01 [routing           ] 5/5  | ✓      | ✓
+  t02 [routing           ] 5/5  | ✓      | ✓
+  t03 [routing           ] 5/5  | ✓      | ✓
+  t06 [memory_correctness] 5/5  | ✓      | ✓
+  t07 [critic_catch      ] 5/5  | ✓      | ✓
+  t08 [task_success      ] 5/5  | ✓      | ✓
+  t09 [step_efficiency   ] 5/5  | ✓      | ✓
+  t10 [hallucination     ] 2/5  | ✓      | ✗
+  t11 [blocked_stop      ] 4/5  | ✓      | ✗
+  t12 [skills            ] 5/5  | ✓      | ✓
+  pass^k по кейсам: 8/10
+
+Провалы:
+  [hallucination] t10: ответ без оговорки 'в тексте не указано': 'согласно тексту "кошки — млекопитающие", кошка имеет 4 лапы.'
+  [hallucination] t10: ответ без оговорки 'в тексте не указано': 'согласно тексту "кошки — млекопитающие", кошка имеет 4 лапы.'
+  [hallucination] t10: ответ без оговорки 'в тексте не указано': 'согласно тексту "кошки — млекопитающие", кошки имеют 4 лапы.'
+  [blocked_stop] t11: blocked="Код заблокирован статической проверкой: обнаружен паттерн 'import socket'.", шагов 2, route=['delegate_executor', 'delegate_executor']

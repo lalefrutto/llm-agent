@@ -31,11 +31,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, END
 
 from agent import metrics as M
+from agent import skills as skills_lib
+from agent.guardrails import irreversible_reason, is_confirmation
 from agent.llm_client import LLMClient
 from agent.tools import code_exec as code_exec_tool
 from agent.tools import file_ops as file_ops_tool
 from agent.tools import web_search as web_search_tool
-from memory.memory_manager import get_memory_backend
+from memory.memory_manager import get_memory_backend, is_memory_worthy
 
 # Langfuse (SDK v2, сервер langfuse/langfuse:2 из docker-compose). Если
 # ключи не заданы, декоратор @observe тихо отключается — код не меняется.
@@ -65,6 +67,10 @@ class AgentState(TypedDict):
     critic_feedback: str | None    # issues+fix последнего revise/reject — передаётся под-агенту напрямую
     step_count: int
     final_answer: str | None
+    pending_action: str | None     # необратимый запрос, ждущий подтверждения (переживает ход через checkpointer)
+    action_confirmed: bool         # пользователь подтвердил pending_action в этом ходе
+    blocked: str | None            # инструмент заблокирован политикой — граф сразу идёт в finalize
+    skills_used: list[str]         # какие SKILL.md были подмешаны в промпты (для трейсов и evals)
 
 
 def _load_prompt(path: str) -> str:
@@ -105,6 +111,7 @@ RESEARCHER_PROMPT = _load_prompt("prompts/subagent_researcher.md")
 EXECUTOR_PROMPT = _load_prompt("prompts/subagent_executor.md")
 CRITIC_PROMPT = _load_prompt("prompts/subagent_critic.md")
 SOUL = _load_prompt("identity/SOUL.md")
+SKILLS = skills_lib.load_skills()
 
 llm = LLMClient()
 memory = get_memory_backend()
@@ -147,64 +154,104 @@ def _chat(node: str, messages: list[dict], **kw):
 
 # ---------------------------------------------------------------- tools ---
 
-def _dispatch_tool(name: str, args: dict) -> str:
-    """Выполняет инструмент под-агента и возвращает строку для tool-сообщения."""
+def _blocked(name: str, reason: str, message: str) -> tuple[str, str]:
+    M.SANDBOX_BLOCKED.labels(reason=reason).inc()
+    M.TOOL_CALLS.labels(tool=name, status="blocked").inc()
+    return json.dumps({"error": message}, ensure_ascii=False), message
+
+
+def _dispatch_tool(name: str, args: dict, allow_destructive: bool = False) -> tuple[str, str | None]:
+    """Выполняет инструмент под-агента. Возвращает (строка для tool-сообщения,
+    причина блокировки или None). Блокировка политикой — терминальное
+    событие: см. _tool_loop и _after_subagent."""
     try:
         if name == "code_exec":
-            res = code_exec_tool.code_exec(args.get("code", ""), args.get("timeout_s", code_exec_tool.DEFAULT_TIMEOUT_S))
+            res = code_exec_tool.code_exec(args.get("code", ""), args.get("timeout_s", code_exec_tool.DEFAULT_TIMEOUT_S),
+                                           allow_destructive=allow_destructive)
             if res.exit_code == -1 and "заблокирован" in res.stderr:
-                M.SANDBOX_BLOCKED.labels(reason="static_check").inc()
-                M.TOOL_CALLS.labels(tool=name, status="blocked").inc()
-            else:
-                M.TOOL_CALLS.labels(tool=name, status="ok" if res.exit_code == 0 else "error").inc()
-            return json.dumps(asdict(res), ensure_ascii=False)
+                reason = "destructive" if "разрушающая" in res.stderr else "static_check"
+                return _blocked(name, reason, res.stderr)
+            M.TOOL_CALLS.labels(tool=name, status="ok" if res.exit_code == 0 else "error").inc()
+            return json.dumps(asdict(res), ensure_ascii=False), None
         if name == "file_read":
             out = file_ops_tool.file_read(args["path"])
             M.TOOL_CALLS.labels(tool=name, status="ok").inc()
-            return out[:8000]
+            return out[:8000], None
         if name == "file_write":
+            if not allow_destructive and file_ops_tool.exists(args["path"]):
+                return _blocked(name, "overwrite", f"Файл '{args['path']}' уже существует: перезапись "
+                                                   "без подтверждения пользователя запрещена.")
             file_ops_tool.file_write(args["path"], args.get("content", ""))
             M.TOOL_CALLS.labels(tool=name, status="ok").inc()
-            return json.dumps({"ok": True, "files_changed": [args["path"]]}, ensure_ascii=False)
+            return json.dumps({"ok": True, "files_changed": [args["path"]]}, ensure_ascii=False), None
         if name == "web_search":
             results = web_search_tool.web_search(args["query"], int(args.get("max_results", 5)))
             M.TOOL_CALLS.labels(tool=name, status="ok").inc()
-            return json.dumps([asdict(r) for r in results], ensure_ascii=False)
+            return json.dumps([asdict(r) for r in results], ensure_ascii=False), None
     except file_ops_tool.PathEscapeError as e:
-        M.SANDBOX_BLOCKED.labels(reason="path_escape").inc()
-        M.TOOL_CALLS.labels(tool=name, status="blocked").inc()
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
+        return _blocked(name, "path_escape", str(e))
     except Exception as e:  # noqa: BLE001
         M.TOOL_CALLS.labels(tool=name, status="error").inc()
-        return json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False)
+        return json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False), None
     M.TOOL_CALLS.labels(tool=name, status="unknown").inc()
-    return json.dumps({"error": f"неизвестный инструмент {name}"}, ensure_ascii=False)
+    return json.dumps({"error": f"неизвестный инструмент {name}"}, ensure_ascii=False), None
 
 
-def _tool_loop(node: str, messages: list[dict], tools: list[dict], model: str) -> tuple[str, list[dict]]:
+def _tool_loop(node: str, messages: list[dict], tools: list[dict], model: str,
+               allow_destructive: bool = False) -> tuple[str, list[dict], str | None]:
     """Стандартный цикл tool-calling: модель -> tool_calls -> результаты ->
     модель, максимум MAX_TOOL_ITERS раундов. Возвращает финальный текст
-    под-агента и журнал вызовов инструментов (уходит в subagent_result,
+    под-агента, журнал вызовов инструментов (уходит в subagent_result,
     чтобы критик и финализатор видели реальные stdout/stderr, а не
-    пересказ модели)."""
+    пересказ модели) и причину блокировки. Если политика заблокировала
+    вызов — цикл обрывается сразу: раньше модель переписывала код и
+    пробовала снова, а роутер переделегировал до MAX_STEPS (6 попыток, 65 с)."""
     calls_log: list[dict] = []
     for _ in range(MAX_TOOL_ITERS):
         reply = _chat(node, messages, tools=tools, model=model)
         tool_calls = reply.tool_calls or []
         if not tool_calls:
-            return reply.content or "", calls_log
+            return reply.content or "", calls_log, None
         messages.append({
             "role": "assistant", "content": reply.content or "",
             "tool_calls": [tc.model_dump() for tc in tool_calls],
         })
         for tc in tool_calls:
             args = _parse_json_response(tc.function.arguments) or {}
-            result = _dispatch_tool(tc.function.name, args)
+            result, blocked = _dispatch_tool(tc.function.name, args, allow_destructive)
             calls_log.append({"tool": tc.function.name, "args": args, "result": result[:2000]})
+            if blocked:
+                return "", calls_log, blocked
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
     # Лимит раундов исчерпан — просим модель подвести итог без инструментов.
     reply = _chat(node, messages, model=model)
-    return reply.content or "", calls_log
+    return reply.content or "", calls_log, None
+
+
+def _last_user_msg(state: AgentState) -> str:
+    return next((m["content"] for m in reversed(state["messages"]) if m["role"] == "user"), "")
+
+
+def _subtask_message(state: AgentState) -> str:
+    """Подзадача для под-агента + исходный запрос пользователя. Роутер (8B)
+    иногда пересказывает задачу без данных — «посчитать среднее продаж» без
+    самих чисел, — и executor выдумывал данные через random.randint."""
+    original = _last_user_msg(state)
+    if not original or original.strip() == state["subtask"].strip():
+        return state["subtask"]
+    return (state["subtask"] + "\n\nИсходный запрос пользователя (все данные бери отсюда, "
+            "ничего не выдумывай):\n" + original)
+
+
+def _with_skills(state: AgentState, agent: str, base_prompt: str, text: str) -> str:
+    """Подмешивает выбранные SKILL.md в системный промпт узла."""
+    delegations = sum(1 for r in state.get("route_history") or [] if r.startswith("delegate_"))
+    selected = skills_lib.select_skills(SKILLS, agent, text, delegations)
+    for sk in selected:
+        M.SKILLS_LOADED.labels(skill=sk.name, agent=agent).inc()
+        if sk.name not in state.setdefault("skills_used", []):
+            state["skills_used"].append(sk.name)
+    return base_prompt + skills_lib.render(selected)
 
 
 _NUM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
@@ -246,8 +293,22 @@ def _unverified_numbers(output: str, calls: list[dict], subtask: str) -> list[st
 def retrieve_memory(state: AgentState) -> AgentState:
     last_user_msg = next((m["content"] for m in reversed(state["messages"]) if m["role"] == "user"), "")
     results = memory.search(state["user_id"], last_user_msg, top_k=5)
-    state["memory_context"] = [r.text for r in results]
+    # Mem0 2.x извлекает факты только аддитивно (без UPDATE/DELETE), поэтому
+    # «живу в Москве» и «переехал в Петербург» хранятся рядом. Отдаём факты
+    # в хронологическом порядке с датой — правило «новее = вернее» см. _memory_block.
+    results = sorted(results, key=lambda r: r.created_at or 0)
+    state["memory_context"] = [
+        (time.strftime("[%Y-%m-%d %H:%M] ", time.localtime(r.created_at)) if r.created_at else "") + r.text
+        for r in results]
     return state
+
+
+def _memory_block(state: AgentState) -> str:
+    facts = "\n".join(f"- {c}" for c in state["memory_context"])
+    if not facts:
+        return "Релевантный контекст из памяти:\n(память пуста)"
+    return ("Релевантный контекст из памяти (по времени сохранения; если факты противоречат "
+            "друг другу, верен более поздний):\n" + facts)
 
 
 @observe(name="router", as_type="generation")
@@ -257,12 +318,27 @@ def route(state: AgentState) -> AgentState:
         state["route"] = "finalize"
         return state
 
-    context_block = "\n".join(f"- {c}" for c in state["memory_context"]) or "(память пуста)"
+    # Жёсткий guardrail: необратимое действие без подтверждения не доходит до LLM-роутера.
+    if state["step_count"] == 0 and not state.get("action_confirmed"):
+        reason = irreversible_reason(_last_user_msg(state))
+        if reason:
+            M.GUARDRAIL_TRIGGERED.labels(reason=reason).inc()
+            state["pending_action"] = _last_user_msg(state)
+            state["route"] = "ask_user"
+            state.setdefault("route_history", []).append("ask_user")
+            M.ROUTE_DECISIONS.labels(action="ask_user").inc()
+            state["step_count"] += 1
+            return state
+
     messages = [
         {"role": "system", "content": SOUL + "\n\n" + SYSTEM_PROMPT},
-        {"role": "system", "content": f"Релевантный контекст из памяти:\n{context_block}"},
+        {"role": "system", "content": _memory_block(state)},
         *state["messages"],
     ]
+    if state.get("action_confirmed") and state["step_count"] == 0:
+        messages.append({"role": "system", "content": (
+            "Пользователь явно подтвердил ранее запрошенное необратимое действие: «"
+            + str(state.get("pending_action")) + "». Делегируй его выполнение executor'у.")})
     verdict = state.get("critic_verdict") or {}
     if verdict.get("verdict") in ("revise", "reject"):
         # Цикл критик -> роутер: переделегируем с учётом issues, а не отвечаем
@@ -304,31 +380,41 @@ def route(state: AgentState) -> AgentState:
 
 @observe(name="researcher", as_type="generation")
 def run_researcher(state: AgentState) -> AgentState:
+    prompt = _with_skills(state, "researcher", SOUL + "\n\n" + RESEARCHER_PROMPT,
+                          _last_user_msg(state) + " " + state["subtask"])
     messages = [
-        {"role": "system", "content": SOUL + "\n\n" + RESEARCHER_PROMPT},
-        {"role": "user", "content": state["subtask"]},
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": _subtask_message(state)},
     ]
     if state.get("critic_feedback"):
         messages.append({"role": "user", "content": state["critic_feedback"]})
         state["critic_feedback"] = None
-    output, calls = _tool_loop("researcher", messages, [web_search_tool.TOOL_SCHEMA], _model_for("researcher"))
+    output, calls, blocked = _tool_loop("researcher", messages, [web_search_tool.TOOL_SCHEMA], _model_for("researcher"))
     state["subagent_result"] = {"agent": "researcher", "output": output, "tool_calls": calls}
+    if blocked:
+        state["subagent_result"]["blocked"] = state["blocked"] = blocked
     return state
 
 
 @observe(name="executor", as_type="generation")
 def run_executor(state: AgentState) -> AgentState:
+    prompt = _with_skills(state, "executor", SOUL + "\n\n" + EXECUTOR_PROMPT,
+                          _last_user_msg(state) + " " + state["subtask"])
     messages = [
-        {"role": "system", "content": SOUL + "\n\n" + EXECUTOR_PROMPT},
-        {"role": "user", "content": state["subtask"]},
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": _subtask_message(state)},
     ]
     if state.get("critic_feedback"):
         messages.append({"role": "user", "content": state["critic_feedback"]
                          + " Напиши НОВЫЙ код: каждую величину — отдельной строкой print(...)."})
         state["critic_feedback"] = None
     tools = [code_exec_tool.TOOL_SCHEMA, *file_ops_tool.TOOL_SCHEMAS]
-    output, calls = _tool_loop("executor", messages, tools, _model_for("executor"))
+    output, calls, blocked = _tool_loop("executor", messages, tools, _model_for("executor"),
+                                        allow_destructive=bool(state.get("action_confirmed")))
     state["subagent_result"] = {"agent": "executor", "output": output, "tool_calls": calls}
+    if blocked:
+        state["subagent_result"]["blocked"] = state["blocked"] = blocked
+        return state
     if any(c["tool"] == "code_exec" for c in calls):
         bad = _unverified_numbers(output, calls, state["subtask"])
         if bad:
@@ -365,10 +451,10 @@ def run_critic(state: AgentState) -> AgentState:
 @observe(name="finalize", as_type="generation")
 def finalize(state: AgentState) -> AgentState:
     context_block = json.dumps(state.get("subagent_result") or {}, ensure_ascii=False)[:6000]
-    memory_block = "\n".join(f"- {c}" for c in state["memory_context"]) or "(память пуста)"
+    prompt = _with_skills(state, "finalize", SOUL + "\n\n" + SYSTEM_PROMPT, _last_user_msg(state))
     messages = [
-        {"role": "system", "content": SOUL + "\n\n" + SYSTEM_PROMPT},
-        {"role": "system", "content": f"Релевантный контекст из памяти:\n{memory_block}"},
+        {"role": "system", "content": prompt},
+        {"role": "system", "content": _memory_block(state)},
         {"role": "system", "content": f"Результаты под-агентов: {context_block}"},
         *state["messages"],
         {"role": "system", "content": (
@@ -390,11 +476,34 @@ def finalize(state: AgentState) -> AgentState:
             f"ВНИМАНИЕ: числа {bad} из ответа под-агента НЕ подтверждены выполнением кода "
             "(их нет в stdout). Сообщи пользователю только значения из stdout code_exec и явно "
             "скажи, что остальные величины вычислить не удалось — не приводи их как результат.")})
-    reply = _chat("finalize", messages, model=_model_for("orchestrator"))
-    state["final_answer"] = reply.content
+    if state.get("blocked"):
+        messages.append({"role": "system", "content": (
+            "Вызов инструмента ЗАБЛОКИРОВАН политикой безопасности: " + state["blocked"]
+            + " Сообщи пользователю, что именно и почему заблокировано. Не предлагай способов обойти "
+              "ограничение и не утверждай, что действие выполнено.")})
+    elif state["route"] == "ask_user" and state.get("pending_action") and not state.get("action_confirmed"):
+        messages.append({"role": "system", "content": (
+            "Запрос пользователя — необратимое действие (" + str(irreversible_reason(state["pending_action"]))
+            + "). Ты его НЕ выполнял. Кратко объясни, что именно будет сделано и чем это грозит, и попроси "
+              "подтвердить ответом «да, подтверждаю» — без подтверждения действие не будет выполнено.")})
+    if state.get("blocked"):
+        # Ответ по шаблону, без LLM: в живом прогоне финализатор при блокировке
+        # написал «все файлы успешно удалены, резервная копия сохранена» —
+        # инструкцию выше 8B-модель проигнорировала.
+        state["final_answer"] = ("Действие не выполнено: вызов инструмента заблокирован политикой "
+                                 "безопасности.\nПричина: " + state["blocked"])
+    else:
+        reply = _chat("finalize", messages, model=_model_for("orchestrator"))
+        state["final_answer"] = reply.content
 
-    last_user_msg = next((m["content"] for m in reversed(state["messages"]) if m["role"] == "user"), "")
-    memory.add(state["user_id"], f"Q: {last_user_msg}\nA: {state['final_answer']}")
+    # В долгосрочную память — только реплика пользователя: раньше уходила пара
+    # «вопрос–ответ», и Mem0 сохранял факты о самом ассистенте («Assistant
+    # explains it is called Атлас…»), которые засоряли поиск и подтягивали
+    # прошлые галлюцинации агента. Вопросы и поручения до экстрактора тоже не
+    # доходят: на них LLM внутри Mem0 сам отвечал и сохранял ответ как «факт».
+    last_user_msg = _last_user_msg(state)
+    if is_memory_worthy(last_user_msg) and not is_confirmation(last_user_msg):
+        memory.add(state["user_id"], last_user_msg)
     return state
 
 
@@ -410,7 +519,10 @@ def _route_selector(state: AgentState) -> Literal["researcher", "executor", "cri
     return mapping.get(state["route"], "finalize")
 
 
-def _after_subagent(state: AgentState) -> Literal["router", "critic"]:
+def _after_subagent(state: AgentState) -> Literal["router", "critic", "finalize"]:
+    # Блокировка политикой — сразу к пользователю, без повторных попыток.
+    if state.get("blocked"):
+        return "finalize"
     # Executor-результаты с высокой ценой ошибки уходят на критика;
     # остальные — обратно роутеру для следующего шага/финализации.
     if state.get("subagent_result", {}).get("agent") == "executor":
@@ -440,8 +552,9 @@ def build_graph():
         "researcher": "researcher", "executor": "executor",
         "critic": "critic", "finalize": "finalize",
     })
-    graph.add_conditional_edges("researcher", _after_subagent, {"router": "router", "critic": "critic"})
-    graph.add_conditional_edges("executor", _after_subagent, {"router": "router", "critic": "critic"})
+    after = {"router": "router", "critic": "critic", "finalize": "finalize"}
+    graph.add_conditional_edges("researcher", _after_subagent, after)
+    graph.add_conditional_edges("executor", _after_subagent, after)
     graph.add_conditional_edges("critic", _after_critic, {"router": "router", "finalize": "finalize"})
     graph.add_edge("finalize", END)
 
@@ -467,6 +580,10 @@ def init_state(user_id: str, thread_id: str, user_message: str) -> AgentState:
         "critic_feedback": None,
         "step_count": 0,
         "final_answer": None,
+        "pending_action": None,
+        "action_confirmed": False,
+        "blocked": None,
+        "skills_used": [],
     }
 
 
@@ -494,6 +611,11 @@ def run_request(app, user_id: str, thread_id: str, user_message: str) -> AgentSt
         if prev_answer and (not history or history[-1].get("role") != "assistant"):
             history.append({"role": "assistant", "content": prev_answer})
         state["messages"] = history[-20:] + state["messages"]  # окно короткосрочной памяти
+        # Подтверждение необратимого действия действует ровно на следующий ход.
+        if prev.values.get("pending_action") and not prev.values.get("action_confirmed") \
+                and is_confirmation(user_message):
+            state["pending_action"] = prev.values["pending_action"]
+            state["action_confirmed"] = True
     t0 = time.perf_counter()
     result = app.invoke(state, config=cfg)
     M.GRAPH_LATENCY.observe(time.perf_counter() - t0)
@@ -501,7 +623,9 @@ def run_request(app, user_id: str, thread_id: str, user_message: str) -> AgentSt
         try:
             langfuse_context.update_current_trace(output=result.get("final_answer"),
                                                   metadata={"route_history": result.get("route_history"),
-                                                            "step_count": result.get("step_count")})
+                                                            "step_count": result.get("step_count"),
+                                                            "skills_used": result.get("skills_used"),
+                                                            "blocked": result.get("blocked")})
         except Exception:  # noqa: BLE001
             pass
     return result

@@ -14,6 +14,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from agent.guardrails import destructive_pattern
+
 SANDBOX_IMAGE = "agent-exec-sandbox:latest"
 DEFAULT_TIMEOUT_S = 30
 
@@ -75,10 +77,17 @@ def _static_check(code: str) -> str | None:
     return None
 
 
-def code_exec(code: str, timeout_s: int = DEFAULT_TIMEOUT_S, workspace: str | None = None) -> ExecResult:
+def code_exec(code: str, timeout_s: int = DEFAULT_TIMEOUT_S, workspace: str | None = None,
+              allow_destructive: bool = False) -> ExecResult:
     block_reason = _static_check(code)
     if block_reason:
         return ExecResult(exit_code=-1, stdout="", stderr=block_reason)
+    # Разрушающие операции (os.remove, shutil.rmtree, ...) — только после явного
+    # подтверждения пользователя (см. agent/guardrails.py).
+    destructive = None if allow_destructive else destructive_pattern(code)
+    if destructive:
+        return ExecResult(exit_code=-1, stdout="", stderr=(
+            f"Код заблокирован: разрушающая операция '{destructive}' без подтверждения пользователя."))
 
     # Внутри контейнера agent-app хостовый путь /workspace не имеет смысла для
     # docker-демона хоста — там монтируем тот же named volume, что и у
