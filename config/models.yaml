@@ -59,9 +59,15 @@ models:
 # живёт одна модель) — поэтому ВСЕ роли на одной резидентной модели.
 # Разводить критика на другую модель (снижение correlated errors) имеет
 # смысл только при VRAM >= 12 GB, когда обе модели резидентны.
+#
+# atlas-hermes3-12k — тот же hermes3, но с num_ctx=12288 вместо дефолтных
+# 4096 (см. config/ollama/hermes3-12k.Modelfile). ВСЕ роли, включая Mem0,
+# обязаны ссылаться на одно и то же имя: для Ollama hermes3 и
+# atlas-hermes3-12k — разные модели (разный num_ctx = отдельный процесс),
+# и смешение вернуло бы swap по 5-7 с на каждом переходе.
 role_assignment:
-  orchestrator: hermes3:8b-llama3.1-q4_K_M
-  researcher: hermes3:8b-llama3.1-q4_K_M
-  executor: hermes3:8b-llama3.1-q4_K_M
-  critic: hermes3:8b-llama3.1-q4_K_M      # альтернатива при >=12GB VRAM: qwen2.5:7b-instruct-q4_K_M
-  memory_extraction: hermes3:8b-llama3.1-q4_K_M  # phi3.5 отвергнута: нет tools в Ollama-шаблоне, JSON 80%
+  orchestrator: atlas-hermes3-12k
+  researcher: atlas-hermes3-12k
+  executor: atlas-hermes3-12k
+  critic: atlas-hermes3-12k               # альтернатива при >=12GB VRAM: qwen2.5:7b-instruct-q4_K_M
+  memory_extraction: atlas-hermes3-12k    # phi3.5 отвергнута: нет tools в Ollama-шаблоне, JSON 80%

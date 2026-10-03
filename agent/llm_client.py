@@ -40,7 +40,7 @@ except ImportError:
 class LLMConfig:
     base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     api_key: str = "ollama"  # Ollama не проверяет ключ, но клиенту OpenAI он нужен формально
-    model: str = os.environ.get("AGENT_DEFAULT_MODEL", "hermes3:8b-llama3.1-q4_K_M")  # см. config/models.yaml
+    model: str = os.environ.get("AGENT_DEFAULT_MODEL", "atlas-hermes3-12k")  # см. config/models.yaml
     temperature: float = 0.2
     max_tokens: int = 1024
     extra_headers: dict = field(default_factory=dict)

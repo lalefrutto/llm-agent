@@ -1,0 +1,77 @@
+  t01 [routing] #1 ✓ — 16.1s
+  t01 [routing] #2 ✓ — 11.5s
+  t01 [routing] #3 ✓ — 29.9s
+  t01 [routing] #4 ✓ — 12.0s
+  t01 [routing] #5 ✓ — 12.0s
+  t02 [routing] #1 ✓ — 29.0s
+  t02 [routing] #2 ✓ — 19.2s
+  t02 [routing] #3 ✓ — 24.7s
+  t02 [routing] #4 ✓ — 22.5s
+  t02 [routing] #5 ✓ — 19.8s
+  t03 [routing] #1 ✓ — 3.8s
+  t03 [routing] #2 ✓ — 3.1s
+  t03 [routing] #3 ✓ — 2.1s
+  t03 [routing] #4 ✓ — 3.5s
+  t03 [routing] #5 ✓ — 5.5s
+  t06 [memory_correctness] #1 ✓ — 19.5s
+  t06 [memory_correctness] #2 ✓ — 18.3s
+  t06 [memory_correctness] #3 ✓ — 19.0s
+  t06 [memory_correctness] #4 ✓ — 18.6s
+  t06 [memory_correctness] #5 ✓ — 17.8s
+  t07 [critic_catch] #1 ✓ — 2.8s
+  t07 [critic_catch] #2 ✓ — 3.3s
+  t07 [critic_catch] #3 ✓ — 2.4s
+  t07 [critic_catch] #4 ✓ — 3.8s
+  t07 [critic_catch] #5 ✓ — 3.6s
+  t08 [task_success] #1 ✗ — 56.3s
+  t08 [task_success] #2 ✓ — 71.9s
+  t08 [task_success] #3 ✓ — 60.7s
+  t08 [task_success] #4 ✓ — 100.9s
+  t08 [task_success] #5 ✓ — 115.3s
+  t09 [step_efficiency] #1 ✓ — 1.8s
+  t09 [step_efficiency] #2 ✓ — 2.0s
+  t09 [step_efficiency] #3 ✓ — 1.8s
+  t09 [step_efficiency] #4 ✓ — 2.2s
+  t09 [step_efficiency] #5 ✓ — 3.5s
+  t10 [hallucination] #1 ✓ — 2.5s
+  t10 [hallucination] #2 ✓ — 2.2s
+  t10 [hallucination] #3 ✓ — 2.9s
+  t10 [hallucination] #4 ✓ — 2.8s
+  t10 [hallucination] #5 ✓ — 2.4s
+  t11 [blocked_stop] #1 ✓ — 2.5s
+  t11 [blocked_stop] #2 ✓ — 4.1s
+  t11 [blocked_stop] #3 ✓ — 3.9s
+  t11 [blocked_stop] #4 ✓ — 3.2s
+  t11 [blocked_stop] #5 ✓ — 4.0s
+  t12 [skills] #1 ✓ — 13.0s
+  t12 [skills] #2 ✓ — 50.2s
+  t12 [skills] #3 ✓ — 14.4s
+  t12 [skills] #4 ✓ — 13.9s
+  t12 [skills] #5 ✓ — 12.6s
+
+=== Итог: 51/52 проверок пройдено ===
+  blocked_stop         5/5
+  critic_catch         5/5
+  guardrail            2/2
+  hallucination        5/5
+  memory_correctness   5/5
+  routing              15/15
+  skills               5/5
+  step_efficiency      5/5
+  task_success         4/5
+
+По кейсам (k=5):  pass rate | pass@k | pass^k
+  t01 [routing           ] 5/5  | ✓      | ✓
+  t02 [routing           ] 5/5  | ✓      | ✓
+  t03 [routing           ] 5/5  | ✓      | ✓
+  t06 [memory_correctness] 5/5  | ✓      | ✓
+  t07 [critic_catch      ] 5/5  | ✓      | ✓
+  t08 [task_success      ] 4/5  | ✓      | ✗
+  t09 [step_efficiency   ] 5/5  | ✓      | ✓
+  t10 [hallucination     ] 5/5  | ✓      | ✓
+  t11 [blocked_stop      ] 5/5  | ✓      | ✓
+  t12 [skills            ] 5/5  | ✓      | ✓
+  pass^k по кейсам: 9/10
+
+Провалы:
+  [task_success] t08: ожидали упоминание ['Ollama']; ответ: 'действие не выполнено: вызов инструмента заблокирован политикой безопасности.\nпричина: код заблокирован статической пров'

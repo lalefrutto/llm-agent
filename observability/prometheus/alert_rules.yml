@@ -9,7 +9,7 @@ groups:
           summary: "Доля ошибок агента > 5% за 5 минут"
 
       - alert: HighLatencyP95
-        expr: histogram_quantile(0.95, rate(agent_request_duration_seconds_bucket[5m])) > 15
+        expr: histogram_quantile(0.95, rate(agent_graph_latency_seconds_bucket[5m])) > 15
         for: 10m
         labels: {severity: warning}
         annotations:
@@ -30,14 +30,14 @@ groups:
           summary: "Модель часто не возвращает валидный JSON маршрутизации — возможна деградация модели/промпта"
 
       - alert: MaxStepsHitFrequently
-        expr: rate(agent_max_steps_reached_total[15m]) > 0.1
+        expr: increase(agent_max_steps_reached_total[15m]) / increase(agent_requests_total[15m]) > 0.1
         for: 10m
         labels: {severity: warning}
         annotations:
           summary: ">10% запросов упираются в MAX_STEPS — возможны циклы делегирования"
 
       - alert: TokenCostSpike
-        expr: rate(agent_llm_tokens_total[1h]) > 5 * rate(agent_llm_tokens_total[1h] offset 1d)
+        expr: rate(agent_tokens_total[1h]) > 5 * rate(agent_tokens_total[1h] offset 1d)
         for: 15m
         labels: {severity: warning}
         annotations:

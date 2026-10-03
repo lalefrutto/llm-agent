@@ -13,6 +13,7 @@ LangGraph checkpointer'ом на уровне графа (см. agent/graph.py).
 from __future__ import annotations
 
 import json
+import re
 import os
 import time
 import uuid
@@ -32,6 +33,56 @@ _SENSITIVE_PATTERNS = (
 )
 
 
+# Правила извлечения фактов для LLM внутри Mem0 (custom_instructions).
+# Без них экстрактор сам отвечал на вопрос пользователя и сохранял ответ как
+# «факт»: из «На основе только этого текста: 'Кошки — млекопитающие' —
+# сколько лап у кошки?» появлялся факт «A cat has 4 paws based on the text»,
+# который в следующем треде агент выдавал за содержание текста (кейс t10);
+# из «посчитай среднее» — неверное «average was 130.5» (на деле 132).
+#
+# Итерации (каждая проверялась прогоном одних и тех же фраз по 3 раза):
+#  1) правила-запреты -> 8B-экстрактор отбрасывал всё, включая «Я живу в
+#     Москве» (t06 упал до 1/5);
+#  2) позитивные правила с примерами на реальных именах -> факты «утекали»
+#     из примеров («User's name is Ильназ» у пользователя, который этого не
+#     говорил), а на анализ продаж экстрактор выдумал месяцы и среднее.
+# Итог: примеры — с обезличенными заглушками, а вопросы и поручения до
+# экстрактора не доходят вообще (is_memory_worthy, детерминированно).
+MEMORY_EXTRACTION_RULES = """\
+Extract facts the user tells about THEMSELVES: name, city, study, work, projects, \
+plans, deadlines, preferences. A statement like "I live in <CITY>" or "I moved to \
+<CITY>" IS such a fact — always extract it. Never answer questions, never compute, \
+never add general knowledge. The examples below use placeholders — never copy \
+anything from them into memories, and never output words in angle brackets: \
+mention only what the user actually said.
+
+Examples:
+"Я живу в <CITY>" -> ["User lives in <CITY>"]
+"Я переехал в <CITY>" -> ["User moved to <CITY>"]
+"Меня зовут <NAME>, я работаю <JOB>" -> ["User's name is <NAME>", "User works as <JOB>"]
+"Запомни: <PREFERENCE>" -> ["User prefers: <PREFERENCE>"]"""
+
+# Фразы-поручения: их смысл — задача для агента, а не факт о пользователе.
+_TASK_VERBS = re.compile(
+    r"^\s*(посчитай|вычисли|рассчитай|проанализируй|найди|сравни|выполни|сделай|напиши|"
+    r"покажи|объясни|переведи|удали|прочитай|сохрани|составь|проверь|построй|сгенерируй|"
+    r"расскажи|ответь|подскажи|помоги)", re.IGNORECASE)
+_FIRST_PERSON = re.compile(r"(?<!\w)(я|меня|мне|мной|мой|моя|моё|мое|мои|моих|у меня|мы|нас|наш|наша)(?!\w)",
+                           re.IGNORECASE)
+
+
+def is_memory_worthy(text: str) -> bool:
+    """Стоит ли отдавать реплику экстрактору Mem0. Вопросы и поручения — нет
+    (иначе экстрактор на них отвечает и сохраняет ответ как факт); явная
+    просьба «запомни» — да; иначе нужна речь от первого лица."""
+    t = text.strip()
+    if re.match(r"^\s*запомни", t, re.IGNORECASE):
+        return True
+    if "?" in t or _TASK_VERBS.match(t):
+        return False
+    return bool(_FIRST_PERSON.search(t))
+
+
 @dataclass
 class MemoryItem:
     id: str
@@ -41,7 +92,7 @@ class MemoryItem:
     metadata: dict = field(default_factory=dict)
 
 
-def _role_model(role: str, default: str = "hermes3:8b-llama3.1-q4_K_M") -> str:
+def _role_model(role: str, default: str = "atlas-hermes3-12k") -> str:
     """Модель роли из config/models.yaml (role_assignment); файл может
     отсутствовать в контейнере/тестах — тогда default."""
     try:
@@ -50,6 +101,15 @@ def _role_model(role: str, default: str = "hermes3:8b-llama3.1-q4_K_M") -> str:
             return (yaml.safe_load(f) or {}).get("role_assignment", {}).get(role) or default
     except Exception:  # noqa: BLE001
         return default
+
+
+def _ts(iso: str | None) -> float:
+    """ISO-время из payload Mem0 -> unix timestamp (0.0, если нет)."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(iso).timestamp() if iso else 0.0
+    except ValueError:
+        return 0.0
 
 
 def _contains_sensitive(text: str) -> bool:
@@ -127,7 +187,7 @@ class Mem0Backend:
     # должны быть согласованы на это же число, иначе insert падает.
     EMBEDDING_DIMS = 768
 
-    def __init__(self, qdrant_url: str = os.environ.get("QDRANT_URL", "http://localhost:6333")):
+    def __init__(self, qdrant_url: str | None = None):
         try:
             from mem0 import Memory  # type: ignore
         except ImportError as e:
@@ -136,15 +196,29 @@ class Mem0Backend:
                 "или используйте LocalJSONMemoryStore для офлайн-режима."
             ) from e
 
-        # agent/llm_client.py использует OpenAI-совместимый путь
-        # (.../v1) для OLLAMA_BASE_URL, а mem0's Ollama-провайдер (LLM и
-        # embedder) ходит напрямую через нативный клиент `ollama`
-        # (pip install ollama), которому нужен base_url БЕЗ суффикса /v1.
+        # ПРИМЕЧАНИЕ: os.environ.get() как значение по умолчанию в сигнатуре
+        # функции вычисляется ОДИН РАЗ при импорте модуля, а не при каждом
+        # вызове — на практике в docker-compose это не страшно (переменные
+        # окружения контейнера выставлены ДО старта Python), но это хрупко
+        # для тестов/повторного использования класса. Поэтому резолвим
+        # внутри __init__, а не в сигнатуре.
+        if qdrant_url is None:
+            qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+
+        # agent/llm_client.py использует OpenAI-совместимый путь (.../v1)
+        # для OLLAMA_BASE_URL, а mem0's Ollama-провайдер (LLM и embedder)
+        # ходит напрямую через нативный клиент `ollama` (pip install ollama),
+        # которому нужен base_url БЕЗ суффикса /v1. Без этого клиент внутри
+        # mem0 использует свой дефолт http://localhost:11434 — а localhost
+        # внутри контейнера agent-app — это сам agent-app. В docker-compose
+        # OLLAMA_BASE_URL задан явно; дефолт совпадает с agent/llm_client.py
+        # (запуск evals с хоста).
         ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         if ollama_base_url.endswith("/v1"):
             ollama_base_url = ollama_base_url[: -len("/v1")]
 
         config = {
+            "custom_instructions": MEMORY_EXTRACTION_RULES,
             "vector_store": {
                 "provider": "qdrant",
                 "config": {
@@ -153,9 +227,6 @@ class Mem0Backend:
                     "embedding_model_dims": self.EMBEDDING_DIMS,
                 },
             },
-            # LLM для извлечения фактов и решений ADD/UPDATE/DELETE —
-            # указываем на тот же локальный Ollama-эндпоинт, что и
-            # основной агент (см. config/models.yaml).
             "llm": {
                 "provider": "ollama",
                 "config": {
@@ -192,7 +263,7 @@ class Mem0Backend:
                 id=it.get("id", ""),
                 user_id=user_id,
                 text=it.get("memory", ""),
-                created_at=0.0,
+                created_at=_ts(it.get("created_at")),
                 metadata=it.get("metadata") or {},
             )
             for it in items

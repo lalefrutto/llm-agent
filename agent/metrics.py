@@ -33,3 +33,7 @@ GRAPH_LATENCY = Histogram(
     buckets=(1, 2, 5, 10, 20, 40, 80, 160))
 TOKENS_TOTAL = Counter(
     "agent_tokens_total", "Токены по типу (prompt/completion)", ["type"])
+GUARDRAIL_TRIGGERED = Counter(
+    "agent_guardrail_triggered_total", "Необратимое действие остановлено до LLM-роутера (ask_user)", ["reason"])
+SKILLS_LOADED = Counter(
+    "agent_skills_loaded_total", "Какие SKILL.md подмешаны в промпт узла", ["skill", "agent"])

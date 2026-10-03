@@ -12,7 +12,7 @@
 |---|---|---|
 | Инструктивность | Rubric-based scoring на наборе промптов с чёткими критериями | Локальный harness + LLM-as-judge (более сильная модель или человек) |
 | Склонность к галлюцинациям | Faithfulness: модель отвечает по данному контексту, проверяем, не добавляет ли фактов вне контекста | Адаптированный протокол TruthfulQA/RAGAS-style faithfulness |
-| Качество tool-calling | % ответов с валидным JSON под заданную tool schema | `evals/run_evals.py::score_tool_calling` |
+| Качество tool-calling | % ответов с валидным JSON под заданную tool schema | `evals/compare_models.py` (TOOL_CASES) |
 | Использование контекстного окна | Needle-in-a-haystack на разной длине контекста (что влияет на качество long-context агентных сценариев) | Кастомный скрипт, синтетические длинные контексты |
 | Скорость | Токенов/сек, latency до первого токена | Замер через `llm_client.py` на локальном железе |
 
@@ -32,9 +32,14 @@
 
 ## Среды запуска
 
-- **CI/локально (разработка):** `pytest evals/` — детерминированные
-  проверки (guardrails, memory correctness, routing на фиксированных
-  seed-примерах).
+- **CI/локально (разработка):** `pytest tests/` — детерминированные
+  проверки без модели: guardrails, выбор skills и логика графа с
+  подменённой LLM (необратимое действие не доходит до роутера, блокировка
+  обрывает цикл, в память пишется только реплика пользователя).
+  Запускается в GitHub Actions (`.github/workflows/tests.yml`).
+- **Живые evals:** `run_evals.py --live --repeats 5` — каждый кейс
+  гоняется k раз; считаются pass rate, pass@k и pass^k (для guardrails
+  важен pass^k: правило должно срабатывать всегда, а не «обычно»).
 - **Пред-релизный прогон:** полный `evals/dataset.jsonl` с LLM-as-judge
   для открытых критериев — вручную или по расписанию.
 - **Continuous monitoring в проде:** сэмплирование N% реального
@@ -45,5 +50,6 @@
 
 ```bash
 pip install -r ../requirements.txt
-python run_evals.py --dataset dataset.jsonl
+python run_evals.py --dataset dataset.jsonl              # офлайн: только guardrails, остальное — «пропущено»
+python run_evals.py --dataset dataset.jsonl --live --repeats 5
 ```
