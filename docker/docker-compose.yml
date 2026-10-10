@@ -40,6 +40,7 @@ services:
       - SANDBOX_WORKSPACE_VOLUME=docker_agent_workspace  # named volume ниже, как его видит docker-демон хоста
       - SEARCH_PROVIDER=${SEARCH_PROVIDER:-ddgs}
       - CHECKPOINT_DB=/app/data/checkpoints.sqlite
+      - THREADS_DB=/app/data/threads.sqlite   # реестр тредов веб-чата (agent/threads.py)
     volumes:
       - agent_workspace:/workspace:rw
       - agent_data:/app/data:rw

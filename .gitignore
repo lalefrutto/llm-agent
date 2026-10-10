@@ -1,16 +1,42 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# runtime state — не артефакты проекта
+# секреты и локальные настройки
+.env
+.env.*
+!.env.example
+
+# runtime state агента — не артефакты проекта
 checkpoints.sqlite*
+threads.sqlite*
 memory_store.json
 /tmp/
+*.log
 
 # отчёт, скриншоты, диаграммы — не публикуются в репозитории
 docs/
 ~$*.docx
+~$*.xlsx
 
-.pytest_cache/
-.env
+# Node (сборка отчёта и прочие утилиты)
+node_modules/
+
+# IDE и ОС
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# локальные настройки Claude Code
+.claude/
