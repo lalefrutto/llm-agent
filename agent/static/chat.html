@@ -3,78 +3,377 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Атлас — чат</title>
+<title></title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c1e21; --muted:#6b7280; --accent:#2563eb; --user:#dbeafe; --bot:#f3f4f6; --border:#e5e7eb; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#0f1115; --card:#171a21; --ink:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; --user:#1e3a5f; --bot:#22262e; --border:#2a2f3a; }
+  :root {
+    --bg: #000; --fg: #d6d6d6; --hi: #fff; --dim: #6e6e6e; --faint: #3a3a3a; --line: #1c1c1c;
+    --bad: #c9786e;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
   }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
-  header h1 { font-size:17px; margin:0; }
-  header small { color:var(--muted); }
-  header code { background:var(--bot); padding:2px 6px; border-radius:4px; }
-  main { max-width:860px; margin:0 auto; padding:16px; }
-  #log { display:flex; flex-direction:column; gap:10px; min-height:50vh; }
-  .msg { padding:10px 14px; border-radius:12px; max-width:85%; white-space:pre-wrap; word-wrap:break-word; }
-  .user { align-self:flex-end; background:var(--user); }
-  .bot { align-self:flex-start; background:var(--bot); }
-  .meta { font-size:12px; color:var(--muted); margin-top:6px; }
-  .meta b { color:var(--accent); font-weight:600; }
-  form { display:flex; gap:8px; margin-top:16px; padding:8px 0; }
-  input, button { font:inherit; }
-  input { flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--ink); }
-  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
-  button:disabled { opacity:.5; cursor:default; }
-  .sys { font-size:12px; color:var(--muted); text-align:center; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 var(--mono);
+         display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 100%; }
+  a { color: var(--dim); text-decoration: none; }
+  a:hover { color: var(--hi); }
+  button { font: inherit; background: none; border: 0; color: var(--dim); cursor: pointer; padding: 0; text-align: left; }
+  button:hover:not(:disabled) { color: var(--hi); }
+  button:disabled { cursor: default; color: var(--faint); }
+
+  /* ---- список тредов ---- */
+  aside { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  #new { padding: 13px 20px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  #new::before { content: "+ "; color: var(--faint); }
+  #list { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .th { position: relative; display: block; width: 100%; padding: 7px 64px 7px 18px; border-left: 2px solid transparent;
+        font-size: 13px; color: var(--dim); cursor: pointer; }
+  .th:hover { color: var(--fg); }
+  .th .acts { position: absolute; right: 16px; top: 7px; display: none; gap: 10px; }
+  .th:hover .acts, .th.cur .acts { display: flex; }
+  .th .acts button { color: var(--faint); }
+  .th .acts button:hover { color: var(--hi); }
+  .th .acts .del:hover { color: var(--bad); }
+  .th.ask { padding-right: 20px; cursor: default; color: var(--fg); }
+  .th.ask .opts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; font-size: 12px; }
+  .th.ask .opts button.danger { color: var(--bad); }
+  .th.ask .opts .help { flex-basis: 100%; color: var(--faint); font-size: 11px; }
+  .th .t { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .th .d { display: block; font-size: 11px; color: var(--faint); }
+  .th.cur { color: var(--hi); border-left-color: var(--hi); }
+  .th input { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--dim); outline: none;
+              color: var(--hi); font: inherit; padding: 0; }
+  .empty { padding: 7px 20px; font-size: 12px; color: var(--faint); }
+  .hint { padding: 10px 20px; font-size: 11px; color: var(--faint); border-top: 1px solid var(--line); }
+
+  /* ---- чат ---- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header { display: flex; justify-content: flex-end; align-items: center; gap: 18px; padding: 10px 20px;
+           border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+  header .title { margin-right: auto; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header span b { color: var(--fg); font-weight: 400; }
+  #toggle { display: none; }
+
+  #log { flex: 1; overflow-y: auto; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
+  .turn { padding: 22px 0; border-bottom: 1px solid var(--line); }
+  .q { color: var(--dim); white-space: pre-wrap; word-wrap: break-word; }
+  .q::before { content: "› "; color: var(--faint); }
+  .a { margin-top: 10px; color: var(--hi); white-space: pre-wrap; word-wrap: break-word; }
+  .a.pending { color: var(--dim); }
+  .a.err { color: var(--bad); }
+  .note { padding: 22px 0; color: var(--faint); font-size: 12px; }
+
+  details { margin-top: 14px; font-size: 12px; }
+  summary { list-style: none; cursor: pointer; color: var(--dim); user-select: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "[+] "; color: var(--faint); }
+  details[open] summary::before { content: "[−] "; }
+  summary:hover { color: var(--hi); }
+  .steps { margin-top: 10px; border-left: 1px solid var(--faint); padding-left: 14px; }
+  .step { margin: 0 0 12px; }
+  .head { display: grid; grid-template-columns: 26px 92px 64px 1fr; color: var(--fg); }
+  .head .n, .head .ms { color: var(--dim); }
+  .head .what { color: var(--hi); }
+  .body { margin: 4px 0 0 26px; color: var(--dim); }
+  .body .k { color: var(--faint); }
+  .body .v { color: var(--fg); white-space: pre-wrap; word-wrap: break-word; }
+  .call { margin-top: 6px; }
+  .code, .out { margin: 3px 0 0; padding: 6px 10px; border: 1px solid var(--line);
+                white-space: pre-wrap; word-wrap: break-word; color: var(--fg); }
+  .out { border-style: dashed; }
+  .bad { color: var(--bad); }
+
+  form { border-top: 1px solid var(--line); }
+  form .wrap { display: flex; align-items: center; gap: 16px; padding-top: 14px; padding-bottom: 14px; }
+  form label { color: var(--faint); }
+  #q { flex: 1; background: none; border: 0; outline: none; color: var(--hi); font: inherit; caret-color: var(--hi); }
+
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; }
+    aside { display: none; }
+    body.side aside { display: flex; position: fixed; inset: 0 30% 0 0; background: var(--bg); z-index: 2; }
+    #toggle { display: inline; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>Атлас — мультиагентный ассистент</h1>
-  <small>user_id: <code id="uid"></code> · thread: <code id="tid">новый</code></small>
-  <small><a href="/metrics" target="_blank">/metrics</a> · <a href="http://localhost:3000" target="_blank">Langfuse</a> · <a href="http://localhost:3001" target="_blank">Grafana</a></small>
-</header>
-<main>
-  <div id="log"><div class="sys">Спросите что-нибудь. Арифметика уйдёт в executor (sandbox), новости — в researcher (web_search), факты о вас — в память (Mem0/Qdrant).</div></div>
+<aside>
+  <button id="new" type="button">новый тред</button>
+  <nav id="list"></nav>
+  <div class="hint">✎ переименовать · × удалить</div>
+</aside>
+<div class="main">
+  <header>
+    <button id="toggle" type="button">треды</button>
+    <span class="title" id="title"></span>
+    <span>user <b id="uid"></b></span>
+    <a href="/metrics" target="_blank">metrics</a>
+    <a href="http://localhost:3000" target="_blank">langfuse</a>
+    <a href="http://localhost:3001" target="_blank">grafana</a>
+  </header>
+  <div id="log"><div class="wrap" id="turns"></div></div>
   <form id="f">
-    <input id="q" autocomplete="off" placeholder="Сообщение…" required>
-    <button id="send" type="submit">Отправить</button>
-    <button id="reset" type="button" title="Новый thread (долгосрочная память сохраняется)">Новый тред</button>
+    <div class="wrap">
+      <label for="q">›</label>
+      <input id="q" autocomplete="off" required autofocus>
+      <button id="send" type="submit">отправить</button>
+    </div>
   </form>
-</main>
+</div>
 <script>
-  const log = document.getElementById('log'), q = document.getElementById('q'), send = document.getElementById('send');
-  let userId = 'demo_user', threadId = null;
+  const $ = id => document.getElementById(id);
+  const turns = $('turns'), log = $('log'), q = $('q'), send = $('send'), list = $('list');
+  let userId = 'demo_user', threadId = null, threads = [];
+  // Номер «текущего вида»: любое действие пользователя (открыть/создать тред)
+  // его увеличивает, и запоздавшая асинхронная загрузка уже ничего не рисует.
+  let viewSeq = 0;
   try { userId = localStorage.getItem('atlas_user') || userId; threadId = localStorage.getItem('atlas_thread'); } catch (e) {}
-  document.getElementById('uid').textContent = userId;
-  document.getElementById('tid').textContent = threadId || 'новый';
-  function add(cls, text, meta) {
-    const d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text;
-    if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.innerHTML = meta; d.appendChild(m); }
-    log.appendChild(d); d.scrollIntoView({behavior:'smooth', block:'end'}); return d;
+  $('uid').textContent = userId;
+
+  // ---------- утилиты ----------
+  function el(tag, cls, ...kids) {   // только textContent, без innerHTML
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    for (const k of kids) if (k !== null && k !== undefined && k !== '') n.append(k instanceof Node ? k : String(k));
+    return n;
   }
-  document.getElementById('reset').onclick = () => { threadId = null; try { localStorage.removeItem('atlas_thread'); } catch (e) {}
-    document.getElementById('tid').textContent = 'новый'; add('sys', '— новый тред —'); };
-  document.getElementById('f').onsubmit = async (ev) => {
-    ev.preventDefault(); const text = q.value.trim(); if (!text) return;
-    add('user', text); q.value = ''; send.disabled = true;
-    const pending = add('bot', '…думаю (роутер → под-агенты → финализация)');
-    try {
-      const r = await fetch('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({user_id:userId, thread_id:threadId, message:text})});
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.detail || r.statusText);
-      threadId = j.thread_id; try { localStorage.setItem('atlas_thread', threadId); } catch (e) {}
-      document.getElementById('tid').textContent = threadId.slice(0, 8);
-      pending.textContent = j.answer;
-      const meta = document.createElement('div'); meta.className = 'meta';
-      meta.innerHTML = 'route: <b>' + (j.route_history || []).join(' → ') + '</b> · steps: ' + j.step_count + ' · ' + j.latency_s + 's';
-      pending.appendChild(meta);
-    } catch (e) { pending.textContent = 'Ошибка: ' + e.message; }
-    finally { send.disabled = false; q.focus(); }
+  const kv = (k, v, cls) => el('div', null, el('span', 'k', k + ' '), el('span', 'v' + (cls ? ' ' + cls : ''), v));
+  const sec = ms => (ms / 1000).toFixed(1) + 's';
+  const scroll = () => { log.scrollTop = log.scrollHeight; };
+  const api = async (url, opts) => {
+    const r = await fetch(url, opts); const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText); return j;
   };
+  const when = ts => {
+    const d = new Date(ts * 1000), now = new Date();
+    return d.toDateString() === now.toDateString()
+      ? d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString('ru', { day: 'numeric', month: 'short' });
+  };
+
+  // Трейсы хранятся на сервере только для последнего ответа треда — остальные
+  // держим в браузере, чтобы они раскрывались и после переключения тредов.
+  const cacheKey = id => 'atlas_traces_' + id;
+  const loadCache = id => { try { return JSON.parse(localStorage.getItem(cacheKey(id)) || '[]'); } catch (e) { return []; } };
+  const saveCache = (id, items) => { try { localStorage.setItem(cacheKey(id), JSON.stringify(items.slice(-50))); } catch (e) {} };
+
+  // ---------- трейс ----------
+  const ACTION = { delegate_executor: '→ executor', delegate_researcher: '→ researcher', delegate_critic: '→ critic',
+                   answer_directly: '→ ответ напрямую', ask_user: '→ спросить пользователя', finalize: '→ финализация' };
+
+  function step(i, ev) {
+    let what = '', body = [];
+    switch (ev.node) {
+      case 'memory':
+        what = ev.facts.length ? ev.facts.length + ' факт(а) из памяти' : 'память пуста';
+        body = ev.facts.map(f => el('div', 'v', '· ' + f));
+        break;
+      case 'guardrail':
+      case 'router':
+        what = ACTION[ev.action] || ev.action;
+        if (ev.reasoning) body.push(kv('почему', ev.reasoning));
+        if (ev.subtask) body.push(kv('подзадача', ev.subtask));
+        break;
+      case 'executor':
+      case 'researcher':
+        what = ev.calls.length ? ev.calls.length + ' вызов(а) инструментов' : 'без вызова инструментов';
+        if (ev.skills.length) body.push(kv('skills', ev.skills.join(', ')));
+        for (const c of ev.calls) {
+          const status = c.exit_code !== undefined ? 'exit ' + c.exit_code : (c.ok ? 'ok' : 'ошибка');
+          body.push(el('div', 'call', kv('$ ' + c.tool, status, c.ok ? '' : 'bad'),
+                       el('div', 'code', c.input), el('div', 'out' + (c.ok ? '' : ' bad'), c.output)));
+        }
+        if (ev.output) body.push(kv('итог под-агента', ev.output));
+        if (ev.unverified) body.push(kv('числа не из stdout', ev.unverified.join(', '), 'bad'));
+        if (ev.blocked) body.push(kv('заблокировано', ev.blocked, 'bad'));
+        break;
+      case 'critic':
+        what = ev.verdict + (ev.auto ? ' (принудительно: проверка чисел)' : '');
+        ev.issues.forEach(x => body.push(kv('замечание', x)));
+        if (ev.fix) body.push(kv('исправить', ev.fix));
+        break;
+      case 'finalize':
+        what = ev.templated ? 'шаблонный ответ (блокировка)' : 'ответ пользователю';
+        if (ev.skills.length) body.push(kv('skills', ev.skills.join(', ')));
+        body.push(kv('память', ev.memory_saved ? 'реплика отправлена в Mem0'
+                                               : 'не сохранялась' + (ev.memory_skip ? ' (' + ev.memory_skip + ')' : '')));
+        break;
+    }
+    const head = el('div', 'head', el('span', 'n', String(i + 1).padStart(2, '0')),
+                     el('span', null, ev.node), el('span', 'ms', sec(ev.ms)),
+                     el('span', 'what' + (ev.blocked || ev.action === 'ask_user' ? ' bad' : ''), what));
+    return el('div', 'step', head, body.length ? el('div', 'body', ...body) : null);
+  }
+
+  function traceBlock(t) {
+    const route = (t.route_history || []).join(' → ') || '—';
+    const d = el('details', null, el('summary', null,
+      'trace · ' + route + ' · шагов ' + (t.step_count ?? '—') + (t.latency_s ? ' · ' + t.latency_s + 's' : '')));
+    d.append(el('div', 'steps', ...(t.trace || []).map((ev, i) => step(i, ev))));
+    return d;
+  }
+
+  function renderTurn(t) {
+    const turn = el('div', 'turn', el('div', 'q', t.q), el('div', 'a', t.a));
+    if (t.trace && t.trace.length) turn.append(traceBlock(t));
+    turns.append(turn);
+  }
+
+  // ---------- треды ----------
+  function setCurrent(id) {
+    threadId = id;
+    try { id ? localStorage.setItem('atlas_thread', id) : localStorage.removeItem('atlas_thread'); } catch (e) {}
+    const meta = threads.find(t => t.thread_id === id);
+    $('title').textContent = meta ? meta.title : '';
+    // Только подсветка, без перерисовки: иначе первый клик двойного клика
+    // пересоздаёт кнопку, и dblclick (переименование) не срабатывает.
+    for (const b of list.querySelectorAll('.th')) b.classList.toggle('cur', b.dataset.id === id);
+  }
+
+  function btn(label, title, onclick, cls) {
+    const b = el('button', cls || null, label); b.type = 'button'; if (title) b.title = title;
+    b.onclick = e => { e.stopPropagation(); onclick(); };
+    return b;
+  }
+
+  function threadItem(t) {
+    const row = el('div', 'th' + (t.thread_id === threadId ? ' cur' : ''),
+                   el('span', 't', t.title), el('span', 'd', when(t.updated_at)),
+                   el('span', 'acts', btn('✎', 'переименовать', () => startRename(row, t)),
+                                      btn('×', 'удалить', () => askDelete(row, t), 'del')));
+    row.title = t.title; row.dataset.id = t.thread_id;
+    // Клик по уже открытому треду ничего не перезагружает.
+    row.onclick = () => { if (t.thread_id !== threadId) openThread(t.thread_id); };
+    row.ondblclick = () => startRename(row, t);
+    return row;
+  }
+
+  function renderList() {
+    list.replaceChildren();
+    if (!threads.length) { list.append(el('div', 'empty', 'тредов пока нет')); return; }
+    for (const t of threads) list.append(threadItem(t));
+  }
+
+  function askDelete(row, t) {
+    row.className = 'th ask'; row.onclick = null; row.ondblclick = null;
+    row.replaceChildren(el('span', 't', 'удалить «' + t.title + '»?'),
+      el('div', 'opts',
+        btn('удалить тред', 'история удаляется, факты о вас в памяти остаются', () => removeThread(t, false), 'danger'),
+        btn('удалить и забыть факты', 'стереть и факты, которые агент запомнил из этого треда', () => removeThread(t, true), 'danger'),
+        btn('отмена', null, () => renderList()),
+        el('span', 'help', 'факты о вас по умолчанию остаются в памяти')));
+  }
+
+  async function removeThread(t, forget) {
+    try {
+      await api('/threads/' + t.thread_id + '?user_id=' + encodeURIComponent(userId) + '&forget_memory=' + (forget ? 1 : 0),
+                { method: 'DELETE' });
+      try { localStorage.removeItem(cacheKey(t.thread_id)); } catch (e) {}
+      threads = threads.filter(x => x.thread_id !== t.thread_id);
+      if (t.thread_id === threadId) newThread();
+      renderList();
+    } catch (e) { alert('Не удалось удалить: ' + e.message); renderList(); }
+  }
+
+  function startRename(row, t) {
+    if (row.querySelector('input')) return;
+    const inp = el('input'); inp.value = t.title;
+    row.onclick = null; row.ondblclick = null;
+    row.replaceChildren(inp); inp.focus(); inp.select();
+    let done = false;
+    const finish = async save => {
+      if (done) return; done = true;
+      const title = inp.value.trim();
+      if (save && title && title !== t.title) {
+        try {
+          const r = await api('/threads/' + t.thread_id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify({ user_id: userId, title }) });
+          t.title = r.title;
+        } catch (e) { alert('Не удалось переименовать: ' + e.message); }
+      }
+      if (t.thread_id === threadId) $('title').textContent = t.title;
+      renderList();
+    };
+    inp.onkeydown = e => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); };
+    inp.onblur = () => finish(true);
+    inp.onclick = e => e.stopPropagation();
+    inp.ondblclick = e => e.stopPropagation();
+  }
+
+  async function refreshList() {
+    try { threads = await api('/threads?user_id=' + encodeURIComponent(userId)); } catch (e) { threads = []; }
+    renderList();
+  }
+
+  async function openThread(id) {
+    const my = ++viewSeq;
+    document.body.classList.remove('side');
+    setCurrent(id); turns.replaceChildren(el('div', 'note', 'загрузка…'));
+    try {
+      const j = await api('/threads/' + id);
+      if (my !== viewSeq) return;
+      const cache = loadCache(id);
+      turns.replaceChildren();
+      if (!j.turns.length) turns.append(el('div', 'note', 'история этого треда не сохранилась'));
+      for (const t of j.turns) {
+        const hit = cache.find(c => c.q === t.q && c.a === t.a);
+        renderTurn(t.trace ? t : (hit || t));
+      }
+    } catch (e) { if (my === viewSeq) turns.replaceChildren(el('div', 'note bad', 'ошибка загрузки: ' + e.message)); }
+    scroll();
+    // Не забираем фокус у поля переименования: двойной клик по неоткрытому
+    // треду сначала открывает его, и раньше конец загрузки уводил курсор в
+    // поле чата — переименование тут же закрывалось.
+    if (!list.querySelector('input')) q.focus();
+  }
+
+  function newThread() {
+    viewSeq++;
+    document.body.classList.remove('side');
+    setCurrent(null); turns.replaceChildren(); q.focus();
+  }
+
+  $('new').onclick = newThread;
+  $('toggle').onclick = () => document.body.classList.toggle('side');
+
+  // ---------- отправка ----------
+  $('f').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = q.value.trim(); if (!text) return;
+    viewSeq++;   // отправка фиксирует текущий тред — старт-загрузка его не перебьёт
+    q.value = ''; send.disabled = true;
+    const ans = el('div', 'a pending', '…');
+    const turn = el('div', 'turn', el('div', 'q', text), ans);
+    turns.querySelectorAll('.note').forEach(n => n.remove());
+    turns.append(turn); scroll();
+    const t0 = Date.now();
+    const tick = setInterval(() => { ans.textContent = '… ' + Math.round((Date.now() - t0) / 1000) + 's'; }, 1000);
+    try {
+      const j = await api('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, thread_id: threadId, message: text }) });
+      ans.className = 'a'; ans.textContent = j.answer;
+      turn.append(traceBlock(j));
+      const cache = loadCache(j.thread_id);
+      cache.push({ q: text, a: j.answer, trace: j.trace, route_history: j.route_history,
+                   step_count: j.step_count, latency_s: j.latency_s });
+      saveCache(j.thread_id, cache);
+      await refreshList();
+      setCurrent(j.thread_id);
+    } catch (e) {
+      ans.className = 'a err'; ans.textContent = 'ошибка: ' + e.message;
+    } finally {
+      clearInterval(tick); send.disabled = false; q.focus(); scroll();
+    }
+  };
+
+  // ---------- старт ----------
+  (async () => {
+    const my = viewSeq;
+    await refreshList();
+    if (my !== viewSeq) return;            // пользователь уже что-то сделал
+    if (threadId && threads.some(t => t.thread_id === threadId)) openThread(threadId);
+    else setCurrent(null);
+  })();
 </script>
 </body>
 </html>

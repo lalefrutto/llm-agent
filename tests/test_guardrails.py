@@ -76,7 +76,43 @@ def test_file_write_and_exists():
     ("Проанализируй мои продажи: 120, 135, 90", False),
     ("Как меня зовут и где я учусь?", False),
     ("Привет", False),
+    ("моего кота зовут мурзум", True),
+    ("мою собаку зовут Рекс", True),
+    ("у моей мамы день рождения 5 мая", True),
+    ("нам дали дедлайн 1 ноября", True),
+    ("как зовут моего кота?", False),
 ])
 def test_memory_gate(text, ok):
     from memory.memory_manager import is_memory_worthy
     assert is_memory_worthy(text) is ok
+
+
+def test_memory_skip_reason_is_specific():
+    from memory.memory_manager import memory_skip_reason
+    assert memory_skip_reason("как зовут моего кота?") == "вопрос"
+    assert memory_skip_reason("Посчитай 18% от 4500") == "поручение агенту"
+    assert memory_skip_reason("Привет") == "нет утверждения о себе"
+    assert memory_skip_reason("моего кота зовут Мурзум") is None
+
+
+@pytest.mark.parametrize("text", [
+    "что самого крупного произошло в мире за последнюю неделю можешь рассказать?",
+    "Что нового вышло у Ollama за последний месяц?",
+    "Какая последняя версия Python?",
+    "какая сегодня погода в Казани",
+    "курс доллара к рублю",
+    "какие новости в мире ИИ",
+    "Что сейчас происходит на рынке видеокарт?",
+])
+def test_freshness_detected(text):
+    from agent.guardrails import freshness_reason
+    assert freshness_reason(text) is not None
+
+
+@pytest.mark.parametrize("text", [
+    "Посчитай 18% от 4500", "Привет, как дела?", "Как меня зовут?",
+    "Объясни, что такое RAG", "Сравни Ollama и vLLM для 8GB VRAM",
+])
+def test_freshness_not_triggered(text):
+    from agent.guardrails import freshness_reason
+    assert freshness_reason(text) is None
