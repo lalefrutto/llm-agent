@@ -67,20 +67,34 @@ _TASK_VERBS = re.compile(
     r"^\s*(посчитай|вычисли|рассчитай|проанализируй|найди|сравни|выполни|сделай|напиши|"
     r"покажи|объясни|переведи|удали|прочитай|сохрани|составь|проверь|построй|сгенерируй|"
     r"расскажи|ответь|подскажи|помоги)", re.IGNORECASE)
-_FIRST_PERSON = re.compile(r"(?<!\w)(я|меня|мне|мной|мой|моя|моё|мое|мои|моих|у меня|мы|нас|наш|наша)(?!\w)",
-                           re.IGNORECASE)
+# Речь от первого лица — все падежные формы: первая версия знала только
+# «мой/моя/мои…» и отклоняла «моего кота зовут Мурзум», «мою собаку…»,
+# «нам дали дедлайн…» — такие факты молча не сохранялись.
+_FIRST_PERSON = re.compile(
+    r"(?<!\w)(я|меня|мне|мной|мы|нас|нам|нами"
+    r"|мо(й|я|ё|е|и|его|ему|им|ём|ем|ей|ю|их|ими)"
+    r"|наш(а|е|и|его|ему|им|ем|ей|у|их|ими)?)(?!\w)", re.IGNORECASE)
+
+
+def memory_skip_reason(text: str) -> str | None:
+    """Почему реплику НЕ стоит отдавать экстрактору Mem0 (None — стоит).
+    Вопросы и поручения — нет (иначе экстрактор на них отвечает и сохраняет
+    ответ как факт); явная просьба «запомни» — да; иначе нужна речь от
+    первого лица."""
+    t = text.strip()
+    if re.match(r"^\s*запомни", t, re.IGNORECASE):
+        return None
+    if "?" in t:
+        return "вопрос"
+    if _TASK_VERBS.match(t):
+        return "поручение агенту"
+    if not _FIRST_PERSON.search(t):
+        return "нет утверждения о себе"
+    return None
 
 
 def is_memory_worthy(text: str) -> bool:
-    """Стоит ли отдавать реплику экстрактору Mem0. Вопросы и поручения — нет
-    (иначе экстрактор на них отвечает и сохраняет ответ как факт); явная
-    просьба «запомни» — да; иначе нужна речь от первого лица."""
-    t = text.strip()
-    if re.match(r"^\s*запомни", t, re.IGNORECASE):
-        return True
-    if "?" in t or _TASK_VERBS.match(t):
-        return False
-    return bool(_FIRST_PERSON.search(t))
+    return memory_skip_reason(text) is None
 
 
 @dataclass
@@ -173,6 +187,14 @@ class LocalJSONMemoryStore:
             return False
         self._save(new_items)
         return True
+
+    def forget_thread(self, user_id: str, thread_id: str) -> int:
+        """Удалить факты, извлечённые из сообщений этого треда."""
+        items = self._load()
+        keep = [it for it in items if not (it["user_id"] == user_id
+                                           and (it.get("metadata") or {}).get("thread_id") == thread_id)]
+        self._save(keep)
+        return len(items) - len(keep)
 
 
 class Mem0Backend:
@@ -276,6 +298,19 @@ class Mem0Backend:
     def delete(self, item_id: str) -> bool:
         self._client.delete(item_id)
         return True
+
+    def forget_thread(self, user_id: str, thread_id: str) -> int:
+        """Удалить факты, извлечённые из сообщений этого треда (по
+        metadata.thread_id, которую ставит graph.finalize). Факты, сохранённые
+        до появления этой метки, к треду не привязаны и не удаляются."""
+        raw = self._client.get_all(filters={"user_id": user_id}, top_k=1000)
+        items = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+        n = 0
+        for it in items:
+            if (it.get("metadata") or {}).get("thread_id") == thread_id:
+                self._client.delete(it["id"])
+                n += 1
+        return n
 
 
 def get_memory_backend():
