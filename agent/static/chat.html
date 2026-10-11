@@ -43,6 +43,18 @@
   .th input { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--dim); outline: none;
               color: var(--hi); font: inherit; padding: 0; }
   .empty { padding: 7px 20px; font-size: 12px; color: var(--faint); }
+  #memlink { padding: 11px 20px; border-top: 1px solid var(--line); font-size: 13px; border-left: 2px solid transparent; }
+  #memlink.cur { color: var(--hi); border-left-color: var(--hi); }
+
+  .memhead { display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+             padding: 22px 0 10px; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .memhead .danger, .fact .danger { color: var(--bad); }
+  .fact { position: relative; padding: 12px 40px 12px 0; border-bottom: 1px solid var(--line); }
+  .fact .v { color: var(--hi); white-space: pre-wrap; word-wrap: break-word; }
+  .fact .d { font-size: 11px; color: var(--faint); }
+  .fact > button.x { position: absolute; right: 0; top: 12px; color: var(--faint); }
+  .fact > button.x:hover { color: var(--bad); }
+  .confirm { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; }
   .hint { padding: 10px 20px; font-size: 11px; color: var(--faint); border-top: 1px solid var(--line); }
 
   /* ---- чат ---- */
@@ -100,6 +112,7 @@
 <aside>
   <button id="new" type="button">новый тред</button>
   <nav id="list"></nav>
+  <button id="memlink" type="button" title="что агент знает о вас">память</button>
   <div class="hint">✎ переименовать · × удалить</div>
 </aside>
 <div class="main">
@@ -205,10 +218,11 @@
     return el('div', 'step', head, body.length ? el('div', 'body', ...body) : null);
   }
 
+  const traceSummary = t => 'trace · ' + ((t.route_history || []).join(' → ') || '—') + ' · шагов '
+    + (t.step_count ?? '—') + (t.latency_s ? ' · ' + t.latency_s + 's' : '');
+
   function traceBlock(t) {
-    const route = (t.route_history || []).join(' → ') || '—';
-    const d = el('details', null, el('summary', null,
-      'trace · ' + route + ' · шагов ' + (t.step_count ?? '—') + (t.latency_s ? ' · ' + t.latency_s + 's' : '')));
+    const d = el('details', null, el('summary', null, traceSummary(t)));
     d.append(el('div', 'steps', ...(t.trace || []).map((ev, i) => step(i, ev))));
     return d;
   }
@@ -305,7 +319,13 @@
     renderList();
   }
 
+  function showChat() {
+    $('f').style.display = '';
+    $('memlink').classList.remove('cur');
+  }
+
   async function openThread(id) {
+    showChat();
     const my = ++viewSeq;
     document.body.classList.remove('side');
     setCurrent(id); turns.replaceChildren(el('div', 'note', 'загрузка…'));
@@ -328,6 +348,7 @@
   }
 
   function newThread() {
+    showChat();
     viewSeq++;
     document.body.classList.remove('side');
     setCurrent(null); turns.replaceChildren(); q.focus();
@@ -336,29 +357,123 @@
   $('new').onclick = newThread;
   $('toggle').onclick = () => document.body.classList.toggle('side');
 
-  // ---------- отправка ----------
+  // ---------- память: что агент знает о пользователе ----------
+  async function openMemory() {
+    const my = ++viewSeq;
+    document.body.classList.remove('side');
+    for (const b of list.querySelectorAll('.th')) b.classList.remove('cur');
+    $('memlink').classList.add('cur'); $('title').textContent = 'память';
+    $('f').style.display = 'none';
+    turns.replaceChildren(el('div', 'note', 'загрузка…'));
+    let facts;
+    try { facts = await api('/memory?user_id=' + encodeURIComponent(userId)); }
+    catch (e) { if (my === viewSeq) turns.replaceChildren(el('div', 'note bad', 'ошибка: ' + e.message)); return; }
+    if (my !== viewSeq) return;
+    renderMemory(facts);
+  }
+
+  function renderMemory(facts) {
+    const head = el('div', 'memhead', el('span', null, facts.length
+      ? 'что агент о вас знает · ' + facts.length + ' факт(ов) · используется во всех тредах'
+      : 'агент пока ничего о вас не запомнил'));
+    if (facts.length) {
+      const all = btn('забыть всё', 'удалить все факты о вас', () => {
+        all.replaceWith(el('span', 'confirm', 'точно забыть всё?',
+          btn('да, забыть всё', null, async () => {
+            try { await api('/memory?user_id=' + encodeURIComponent(userId), { method: 'DELETE' }); renderMemory([]); }
+            catch (e) { alert('Не удалось: ' + e.message); }
+          }, 'danger'),
+          btn('отмена', null, () => renderMemory(facts))));
+      }, 'danger');
+      head.append(all);
+    }
+    turns.replaceChildren(head, ...facts.map(f => factRow(f, facts)));
+  }
+
+  function factRow(f, facts) {
+    const src = f.thread_title ? 'из треда «' + f.thread_title + '»'
+              : f.thread_id ? 'из удалённого треда' : 'сохранено до привязки к тредам';
+    const row = el('div', 'fact', el('div', 'v', f.text),
+                   el('div', 'd', src + (f.created_at ? ' · ' + when(f.created_at) : '')));
+    const x = btn('×', 'забыть этот факт', () => {
+      x.remove();
+      row.append(el('div', 'confirm',
+        btn('забыть', null, async () => {
+          try {
+            await api('/memory/' + f.id + '?user_id=' + encodeURIComponent(userId), { method: 'DELETE' });
+            renderMemory(facts.filter(o => o.id !== f.id));
+          } catch (e) { alert('Не удалось: ' + e.message); }
+        }, 'danger'),
+        btn('отмена', null, () => renderMemory(facts))));
+    }, 'x');
+    row.append(x);
+    return row;
+  }
+
+  $('memlink').onclick = openMemory;
+
+  // ---------- отправка: ответ и шаги трейса приходят потоком ----------
   $('f').onsubmit = async (ev) => {
     ev.preventDefault();
     const text = q.value.trim(); if (!text) return;
     viewSeq++;   // отправка фиксирует текущий тред — старт-загрузка его не перебьёт
     q.value = ''; send.disabled = true;
     const ans = el('div', 'a pending', '…');
-    const turn = el('div', 'turn', el('div', 'q', text), ans);
+    const steps = el('div', 'steps'), summary = el('summary', null, 'trace · …');
+    const turn = el('div', 'turn', el('div', 'q', text), ans, el('details', null, summary, steps));
     turns.querySelectorAll('.note').forEach(n => n.remove());
     turns.append(turn); scroll();
-    const t0 = Date.now();
-    const tick = setInterval(() => { ans.textContent = '… ' + Math.round((Date.now() - t0) / 1000) + 's'; }, 1000);
+    const t0 = Date.now(), live = [];
+    let gotToken = false, final = null;
+    const tick = setInterval(() => {
+      if (gotToken) return;
+      const last = live.length ? live[live.length - 1].node : '';
+      ans.textContent = '… ' + Math.round((Date.now() - t0) / 1000) + 's' + (last ? ' · после ' + last : '');
+    }, 500);
+    const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    const handle = e => {
+      if (e.type === 'start') {
+        threadId = e.thread_id; try { localStorage.setItem('atlas_thread', threadId); } catch (er) {}
+      } else if (e.type === 'step') {
+        live.push(e.event);
+        steps.append(step(live.length - 1, e.event));
+        summary.textContent = 'trace · ' + live.map(x => x.node).join(' → ') + ' …';
+      } else if (e.type === 'token') {
+        const stick = nearBottom();
+        if (!gotToken) { gotToken = true; ans.className = 'a'; ans.textContent = ''; }
+        ans.textContent += e.text;
+        if (stick) scroll();
+      } else if (e.type === 'done') {
+        final = e;
+      } else if (e.type === 'error') {
+        throw new Error(e.detail);
+      }
+    };
     try {
-      const j = await api('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const r = await fetch('/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, thread_id: threadId, message: text }) });
-      ans.className = 'a'; ans.textContent = j.answer;
-      turn.append(traceBlock(j));
-      const cache = loadCache(j.thread_id);
-      cache.push({ q: text, a: j.answer, trace: j.trace, route_history: j.route_history,
-                   step_count: j.step_count, latency_s: j.latency_s });
-      saveCache(j.thread_id, cache);
+      if (!r.ok || !r.body) throw new Error(r.statusText || 'нет ответа');
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (line.trim()) handle(JSON.parse(line));
+        }
+      }
+      if (!final) throw new Error('соединение прервано до конца ответа');
+      ans.className = 'a'; ans.textContent = final.answer;
+      summary.textContent = traceSummary(final);
+      const cache = loadCache(final.thread_id);
+      cache.push({ q: text, a: final.answer, trace: final.trace, route_history: final.route_history,
+                   step_count: final.step_count, latency_s: final.latency_s });
+      saveCache(final.thread_id, cache);
       await refreshList();
-      setCurrent(j.thread_id);
+      setCurrent(final.thread_id);
     } catch (e) {
       ans.className = 'a err'; ans.textContent = 'ошибка: ' + e.message;
     } finally {

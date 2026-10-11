@@ -259,3 +259,24 @@ def test_failed_search_makes_finalize_honest(fake):
 def test_prompts_contain_today():
     import time
     assert time.strftime("%Y-%m-%d") in g._base("x")
+
+
+def test_memory_relevance_threshold(fake):
+    item = lambda text, score: SimpleNamespace(text=text, created_at=1_790_000_000.0, score=score)  # noqa: E731
+    fake.memory.search = lambda user_id, query, top_k=5: [
+        item("User's cat is named Мурзум", 0.69), item("4 в степени 1/2 равно 2.0", 0.28)]
+    res, _ = run(fake, "как зовут моего кота?")
+    mem = res["trace"][0]
+    assert [f.split("] ")[-1] for f in mem["facts"]] == ["User's cat is named Мурзум"]
+    assert [(x["score"], x["used"]) for x in mem["scored"]] == [(0.69, True), (0.28, False)]
+
+
+def test_stream_sink_gets_steps_and_tokens(fake, monkeypatch):
+    monkeypatch.setattr(g.llm, "chat_stream", lambda messages, model=None: iter(["Мур", "зум"]))
+    events = []
+    res = g.run_request_stream(fake.app, "u1", "t-stream", "моего кота зовут Мурзум", events.append)
+    steps = [e["event"]["node"] for e in events if e["type"] == "step"]
+    tokens = "".join(e["text"] for e in events if e["type"] == "token")
+    assert steps == ["memory", "router", "finalize"]
+    assert tokens == "Мурзум" == res["final_answer"]
+    assert "t-stream" not in g._SINKS                       # приёмник снят после запроса

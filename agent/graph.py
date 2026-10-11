@@ -52,6 +52,7 @@ except ImportError:  # langfuse не установлен — no-op декора
 
 MAX_STEPS = 6  # guardrail против бесконечных циклов делегирования (см. prompts/system_prompt.md)
 MAX_TOOL_ITERS = 3  # сколько раундов tool-calling даём под-агенту на одну подзадачу
+MIN_MEMORY_SCORE = float(os.environ.get("MIN_MEMORY_SCORE", "0.5"))  # порог релевантности фактов из Mem0
 
 
 class AgentState(TypedDict):
@@ -77,6 +78,7 @@ class AgentState(TypedDict):
     memory_skip: str | None        # почему реплика не отправлена в память (для трейса)
     trace: list[dict]              # пошаговый трейс запроса для веб-чата (см. _traced)
     search_ok: bool                # web_search в этом запросе вернул хоть один результат
+    memory_debug: list[dict]       # все найденные факты со score и отметкой, прошли ли порог
 
 
 def _load_prompt(path: str) -> str:
@@ -148,12 +150,8 @@ def _model_for(role: str) -> str:
     return os.environ.get("AGENT_MODEL_OVERRIDE") or ROLE_MODELS.get(role) or llm.config.model
 
 
-def _chat(node: str, messages: list[dict], **kw):
-    """Обёртка над llm.chat с метриками латентности/токенов по узлу графа
-    и generation-спаном в Langfuse."""
-    t0 = time.perf_counter()
-    reply = llm.chat(messages, **kw)
-    dt = time.perf_counter() - t0
+def _record_llm_call(node: str, messages: list[dict], output, dt: float, model: str | None) -> None:
+    """Метрики латентности/токенов по узлу графа и generation-спан в Langfuse."""
     M.LLM_LATENCY.labels(node=node).observe(dt)
     usage = llm.last_usage
     if usage is not None:
@@ -162,16 +160,55 @@ def _chat(node: str, messages: list[dict], **kw):
     if langfuse_context is not None:
         try:
             langfuse_context.update_current_observation(
-                model=kw.get("model") or llm.config.model,
+                model=model or llm.config.model,
                 input=messages,
-                output=reply.content if reply.content else [tc.model_dump() for tc in (reply.tool_calls or [])],
+                output=output,
                 usage={"input": getattr(usage, "prompt_tokens", 0), "output": getattr(usage, "completion_tokens", 0)}
                 if usage else None,
                 metadata={"node": node, "latency_s": round(dt, 3)},
             )
         except Exception:  # noqa: BLE001 — трейсинг не должен ронять граф
             pass
+
+
+def _chat(node: str, messages: list[dict], **kw):
+    t0 = time.perf_counter()
+    reply = llm.chat(messages, **kw)
+    _record_llm_call(node, messages,
+                     reply.content if reply.content else [tc.model_dump() for tc in (reply.tool_calls or [])],
+                     time.perf_counter() - t0, kw.get("model"))
     return reply
+
+
+# ---------------------------------------------------------------- stream ---
+# Потоковая выдача для веб-чата: шаги трейса уходят в браузер сразу после
+# узла, а финальный ответ — по мере генерации. Приёмник регистрируется на
+# время запроса по thread_id (run_request_stream); без приёмника граф
+# работает как раньше (API /chat, evals, тесты).
+_SINKS: dict = {}
+
+
+def _emit(state: AgentState, event: dict) -> None:
+    sink = _SINKS.get(state.get("thread_id"))
+    if sink is not None:
+        try:
+            sink(event)
+        except Exception:  # noqa: BLE001 — оборванное соединение не должно ронять граф
+            pass
+
+
+def _chat_text(node: str, messages: list[dict], state: AgentState, model: str) -> str:
+    """Текстовый ответ LLM; если на тред подписан веб-чат — потоком."""
+    if state.get("thread_id") not in _SINKS:
+        return _chat(node, messages, model=model).content or ""
+    t0 = time.perf_counter()
+    parts: list[str] = []
+    for piece in llm.chat_stream(messages, model=model):
+        parts.append(piece)
+        _emit(state, {"type": "token", "text": piece})
+    text = "".join(parts)
+    _record_llm_call(node, messages, text, time.perf_counter() - t0, model)
+    return text
 
 
 # ---------------------------------------------------------------- tools ---
@@ -316,6 +353,14 @@ def _unverified_numbers(output: str, calls: list[dict], subtask: str) -> list[st
 def retrieve_memory(state: AgentState) -> AgentState:
     last_user_msg = next((m["content"] for m in reversed(state["messages"]) if m["role"] == "user"), "")
     results = memory.search(state["user_id"], last_user_msg, top_k=5)
+    # Порог релевантности: поиск всегда возвращает top-k, даже если ничего
+    # похожего нет. С bge-m3 нужные факты набирают 0.57–0.69, а нерелевантные
+    # — до 0.48 (на «Привет, как дела?» не проходит ни один), см. memory_manager.
+    def score(r):  # у локального JSON-бэкенда score нет — такие факты не фильтруем
+        return getattr(r, "score", None)
+    state["memory_debug"] = [{"text": r.text, "score": None if score(r) is None else round(score(r), 2),
+                              "used": score(r) is None or score(r) >= MIN_MEMORY_SCORE} for r in results]
+    results = [r for r in results if score(r) is None or score(r) >= MIN_MEMORY_SCORE]
     # Mem0 2.x извлекает факты только аддитивно (без UPDATE/DELETE), поэтому
     # «живу в Москве» и «переехал в Петербург» хранятся рядом. Отдаём факты
     # в хронологическом порядке с датой — правило «новее = вернее» см. _memory_block.
@@ -547,15 +592,16 @@ def finalize(state: AgentState) -> AgentState:
         # инструкцию выше 8B-модель проигнорировала.
         state["final_answer"] = ("Действие не выполнено: вызов инструмента заблокирован политикой "
                                  "безопасности.\nПричина: " + state["blocked"])
+        _emit(state, {"type": "token", "text": state["final_answer"]})
     else:
-        reply = _chat("finalize", messages, model=_model_for("orchestrator"))
-        state["final_answer"] = reply.content
+        state["final_answer"] = _chat_text("finalize", messages, state, _model_for("orchestrator"))
         if state["route"] == "ask_user" and state.get("pending_action") and not state.get("action_confirmed"):
             # 8B-финализатор регулярно забывает фразу подтверждения (или просит
             # другую, например «удалить файлы», которую guardrail не примет) —
             # добавляем её программно.
-            state["final_answer"] = (state["final_answer"] or "").rstrip() + (
-                "\n\nЧтобы выполнить это действие, ответьте одним сообщением: «да, подтверждаю».")
+            suffix = "\n\nЧтобы выполнить это действие, ответьте одним сообщением: «да, подтверждаю»."
+            state["final_answer"] = (state["final_answer"] or "").rstrip() + suffix
+            _emit(state, {"type": "token", "text": suffix})
 
     # В долгосрочную память — только реплика пользователя: раньше уходила пара
     # «вопрос–ответ», и Mem0 сохранял факты о самом ассистенте («Assistant
@@ -647,7 +693,8 @@ def _trace_tool_call(call: dict) -> dict:
 
 def _trace_event(node: str, before: dict, state: AgentState) -> dict | None:
     if node == "memory_retrieval":
-        return {"node": "memory", "facts": list(state["memory_context"])}
+        return {"node": "memory", "facts": list(state["memory_context"]),
+                "scored": list(state.get("memory_debug") or []), "min_score": MIN_MEMORY_SCORE}
     if node == "router":
         if len(state.get("route_history") or []) == len(before["route_history"]):
             return {"node": "router", "action": "finalize", "reasoning": state.get("route_reasoning", "")}
@@ -688,6 +735,7 @@ def _traced(node: str, fn):
         if ev is not None:
             ev["ms"] = round((time.perf_counter() - t0) * 1000)
             state.setdefault("trace", []).append(ev)
+            _emit(state, {"type": "step", "event": ev})
         return state
     return wrapper
 
@@ -745,6 +793,7 @@ def init_state(user_id: str, thread_id: str, user_message: str) -> AgentState:
         "memory_skip": None,
         "trace": [],
         "search_ok": False,
+        "memory_debug": [],
     }
 
 
@@ -790,6 +839,16 @@ def run_request(app, user_id: str, thread_id: str, user_message: str) -> AgentSt
         except Exception:  # noqa: BLE001
             pass
     return result
+
+
+def run_request_stream(app, user_id: str, thread_id: str, user_message: str, sink) -> AgentState:
+    """run_request, но события (шаги трейса и куски ответа) по ходу работы
+    передаются в sink(event)."""
+    _SINKS[thread_id] = sink
+    try:
+        return run_request(app, user_id, thread_id, user_message)
+    finally:
+        _SINKS.pop(thread_id, None)
 
 
 def delete_thread(app, user_id: str, thread_id: str, forget_memory: bool = False) -> int:
