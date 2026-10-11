@@ -1,0 +1,50 @@
+  t13 [freshness] #1 ✓ — 32.8s
+  t13 [freshness] #2 ✓ — 18.8s
+  t13 [freshness] #3 ✓ — 22.7s
+  t13 [freshness] #4 ✓ — 18.4s
+  t13 [freshness] #5 ✓ — 17.2s
+  t14 [freshness] #1 ✓ — 10.8s
+  t14 [freshness] #2 ✓ — 9.4s
+  t14 [freshness] #3 ✓ — 17.5s
+  t14 [freshness] #4 ✓ — 12.8s
+  t14 [freshness] #5 ✓ — 10.4s
+  t15 [freshness] #1 ✓ — 27.7s
+  t15 [freshness] #2 ✓ — 19.9s
+  t15 [freshness] #3 ✓ — 21.5s
+  t15 [freshness] #4 ✓ — 22.7s
+  t15 [freshness] #5 ✓ — 19.3s
+  t16 [freshness] #1 ✓ — 7.4s
+  t16 [freshness] #2 ✓ — 17.3s
+  t16 [freshness] #3 ✓ — 7.1s
+  t16 [freshness] #4 ✓ — 27.0s
+  t16 [freshness] #5 ✓ — 11.9s
+  t17 [freshness] #1 ✓ — 23.0s
+  t17 [freshness] #2 ✓ — 25.4s
+  t17 [freshness] #3 ✓ — 20.9s
+  t17 [freshness] #4 ✓ — 22.2s
+  t17 [freshness] #5 ✓ — 16.0s
+  t18 [freshness] #1 ✓ — 12.8s
+  t18 [freshness] #2 ✓ — 9.3s
+  t18 [freshness] #3 ✓ — 13.2s
+  t18 [freshness] #4 ✓ — 50.8s
+  t18 [freshness] #5 ✓ — 24.2s
+  t19 [freshness] #1 ✓ — 7.8s
+  t19 [freshness] #2 ✓ — 8.2s
+  t19 [freshness] #3 ✓ — 9.5s
+  t19 [freshness] #4 ✓ — 8.0s
+  t19 [freshness] #5 ✓ — 11.9s
+
+=== Итог: 35/35 проверок пройдено ===
+  freshness            35/35
+
+По кейсам (k=5):  pass rate | pass@k | pass^k
+  t13 [freshness         ] 5/5  | ✓      | ✓
+  t14 [freshness         ] 5/5  | ✓      | ✓
+  t15 [freshness         ] 5/5  | ✓      | ✓
+  t16 [freshness         ] 5/5  | ✓      | ✓
+  t17 [freshness         ] 5/5  | ✓      | ✓
+  t18 [freshness         ] 5/5  | ✓      | ✓
+  t19 [freshness         ] 5/5  | ✓      | ✓
+  pass^k по кейсам: 7/7
+
+Guardrail свежести исправил решение LLM-роутера: 18 раз (t13, t13, t13, t13, t13, t14, t14, t14, t14, t14, t16, t16, t16, t16, t16, t18, t18, t18)

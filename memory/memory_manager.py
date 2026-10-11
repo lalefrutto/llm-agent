@@ -67,20 +67,34 @@ _TASK_VERBS = re.compile(
     r"^\s*(посчитай|вычисли|рассчитай|проанализируй|найди|сравни|выполни|сделай|напиши|"
     r"покажи|объясни|переведи|удали|прочитай|сохрани|составь|проверь|построй|сгенерируй|"
     r"расскажи|ответь|подскажи|помоги)", re.IGNORECASE)
-_FIRST_PERSON = re.compile(r"(?<!\w)(я|меня|мне|мной|мой|моя|моё|мое|мои|моих|у меня|мы|нас|наш|наша)(?!\w)",
-                           re.IGNORECASE)
+# Речь от первого лица — все падежные формы: первая версия знала только
+# «мой/моя/мои…» и отклоняла «моего кота зовут Мурзум», «мою собаку…»,
+# «нам дали дедлайн…» — такие факты молча не сохранялись.
+_FIRST_PERSON = re.compile(
+    r"(?<!\w)(я|меня|мне|мной|мы|нас|нам|нами"
+    r"|мо(й|я|ё|е|и|его|ему|им|ём|ем|ей|ю|их|ими)"
+    r"|наш(а|е|и|его|ему|им|ем|ей|у|их|ими)?)(?!\w)", re.IGNORECASE)
+
+
+def memory_skip_reason(text: str) -> str | None:
+    """Почему реплику НЕ стоит отдавать экстрактору Mem0 (None — стоит).
+    Вопросы и поручения — нет (иначе экстрактор на них отвечает и сохраняет
+    ответ как факт); явная просьба «запомни» — да; иначе нужна речь от
+    первого лица."""
+    t = text.strip()
+    if re.match(r"^\s*запомни", t, re.IGNORECASE):
+        return None
+    if "?" in t:
+        return "вопрос"
+    if _TASK_VERBS.match(t):
+        return "поручение агенту"
+    if not _FIRST_PERSON.search(t):
+        return "нет утверждения о себе"
+    return None
 
 
 def is_memory_worthy(text: str) -> bool:
-    """Стоит ли отдавать реплику экстрактору Mem0. Вопросы и поручения — нет
-    (иначе экстрактор на них отвечает и сохраняет ответ как факт); явная
-    просьба «запомни» — да; иначе нужна речь от первого лица."""
-    t = text.strip()
-    if re.match(r"^\s*запомни", t, re.IGNORECASE):
-        return True
-    if "?" in t or _TASK_VERBS.match(t):
-        return False
-    return bool(_FIRST_PERSON.search(t))
+    return memory_skip_reason(text) is None
 
 
 @dataclass
@@ -90,6 +104,7 @@ class MemoryItem:
     text: str
     created_at: float
     metadata: dict = field(default_factory=dict)
+    score: float | None = None    # косинусная близость к запросу (только из search)
 
 
 def _role_model(role: str, default: str = "atlas-hermes3-12k") -> str:
@@ -174,6 +189,17 @@ class LocalJSONMemoryStore:
         self._save(new_items)
         return True
 
+    def list(self, user_id: str) -> list[MemoryItem]:
+        return [MemoryItem(**i) for i in self._load() if i["user_id"] == user_id]
+
+    def forget_thread(self, user_id: str, thread_id: str) -> int:
+        """Удалить факты, извлечённые из сообщений этого треда."""
+        items = self._load()
+        keep = [it for it in items if not (it["user_id"] == user_id
+                                           and (it.get("metadata") or {}).get("thread_id") == thread_id)]
+        self._save(keep)
+        return len(items) - len(keep)
+
 
 class Mem0Backend:
     """Тонкая обёртка над реальным mem0ai клиентом. Требует:
@@ -182,10 +208,15 @@ class Mem0Backend:
     запуска на машине разработчика/в Claude Code.
     """
 
-    # nomic-embed-text отдаёт 768-мерные векторы через нативный Ollama API
-    # (mem0 не обрезает их под Matryoshka) — Qdrant-коллекция и embedder
-    # должны быть согласованы на это же число, иначе insert падает.
-    EMBEDDING_DIMS = 768
+    # Эмбеддинги — мультиязычная bge-m3 (1024 dims) на CPU, см.
+    # config/ollama/bge-m3-cpu.Modelfile. Прежняя nomic-embed-text не понимала
+    # русские вопросы: на «как зовут моего кота?» мусорный факт «4 в степени
+    # 1/2 равно 2.0» получал 0.59, а правильный «cat is named Мурзум» — 0.55;
+    # у bge-m3 — 0.28 против 0.69. Размерность коллекции Qdrant и эмбеддера
+    # должна совпадать, поэтому у bge-m3 своя коллекция (старая — на 768).
+    EMBEDDING_DIMS = 1024
+    EMBED_MODEL = os.environ.get("MEM0_EMBED_MODEL", "atlas-bge-m3-cpu")
+    COLLECTION = os.environ.get("MEM0_COLLECTION", "mem0_bge_m3")
 
     def __init__(self, qdrant_url: str | None = None):
         try:
@@ -224,6 +255,7 @@ class Mem0Backend:
                 "config": {
                     "host": qdrant_url.split("://")[-1].split(":")[0],
                     "port": 6333,
+                    "collection_name": self.COLLECTION,
                     "embedding_model_dims": self.EMBEDDING_DIMS,
                 },
             },
@@ -237,7 +269,7 @@ class Mem0Backend:
             "embedder": {
                 "provider": "ollama",
                 "config": {
-                    "model": "nomic-embed-text",
+                    "model": self.EMBED_MODEL,
                     "ollama_base_url": ollama_base_url,
                     "embedding_dims": self.EMBEDDING_DIMS,
                 },
@@ -265,9 +297,18 @@ class Mem0Backend:
                 text=it.get("memory", ""),
                 created_at=_ts(it.get("created_at")),
                 metadata=it.get("metadata") or {},
+                score=it.get("score"),
             )
             for it in items
         ]
+
+    def list(self, user_id: str) -> list[MemoryItem]:
+        """Все факты пользователя (для экрана «что агент обо мне знает»)."""
+        raw = self._client.get_all(filters={"user_id": user_id}, top_k=1000)
+        items = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+        return [MemoryItem(id=it.get("id", ""), user_id=user_id, text=it.get("memory", ""),
+                           created_at=_ts(it.get("created_at")), metadata=it.get("metadata") or {})
+                for it in items]
 
     def update(self, item_id: str, new_text: str) -> bool:
         self._client.update(item_id, new_text)
@@ -276,6 +317,19 @@ class Mem0Backend:
     def delete(self, item_id: str) -> bool:
         self._client.delete(item_id)
         return True
+
+    def forget_thread(self, user_id: str, thread_id: str) -> int:
+        """Удалить факты, извлечённые из сообщений этого треда (по
+        metadata.thread_id, которую ставит graph.finalize). Факты, сохранённые
+        до появления этой метки, к треду не привязаны и не удаляются."""
+        raw = self._client.get_all(filters={"user_id": user_id}, top_k=1000)
+        items = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+        n = 0
+        for it in items:
+            if (it.get("metadata") or {}).get("thread_id") == thread_id:
+                self._client.delete(it["id"])
+                n += 1
+        return n
 
 
 def get_memory_backend():

@@ -34,6 +34,7 @@ class EvalReport:
     by_case: dict = field(default_factory=lambda: defaultdict(list))  # id -> [ok, ok, ...] по повторам
     case_category: dict = field(default_factory=dict)
     failures: list = field(default_factory=list)
+    guardrail_overrides: list = field(default_factory=list)   # кейсы, где решение LLM-роутера исправил код
 
     def record(self, category: str, ok: bool, case_id: str, detail: str = ""):
         self.total += 1
@@ -63,6 +64,9 @@ class EvalReport:
                 print(f"  {cid} [{self.case_category[cid]:18s}] {sum(r)}/{len(r)}  | "
                       f"{'✓' if any(r) else '✗'}      | {'✓' if all(r) else '✗'}")
             print(f"  pass^k по кейсам: {sum(all(r) for r in repeated.values())}/{len(repeated)}")
+        if self.guardrail_overrides:
+            print(f"\nGuardrail свежести исправил решение LLM-роутера: {len(self.guardrail_overrides)} раз "
+                  f"({', '.join(self.guardrail_overrides)})")
         if self.skipped:
             print(f"\nПропущено без --live: {len(self.skipped)} ({', '.join(self.skipped)})")
         if self.failures:
@@ -176,6 +180,16 @@ def run_live_case(case: dict, report: EvalReport, graph_app, run_request):
             report.record(category, ok, case["id"],
                           detail=f"ожидали {case['expected_answer_contains']!r}; ответ: {answer[:120]!r}")
 
+        elif category == "freshness":
+            result = run_request(graph_app, eval_user, tid, case["input"])
+            history = result.get("route_history") or ["<none>"]
+            ok = history[0] == case["expected_route"]
+            if any(e.get("node") == "guardrail" and e.get("action") == "delegate_researcher"
+                   for e in result.get("trace") or []):
+                report.guardrail_overrides.append(case["id"])
+            report.record(category, ok, case["id"],
+                          detail=f"ожидали {case['expected_route']}, роутер решил {history}")
+
         elif category == "blocked_stop":
             # Заблокированный политикой вызов должен сразу вести к ответу, без повторов.
             result = run_request(graph_app, eval_user, tid, case["input"])
@@ -219,11 +233,16 @@ def main():
     parser.add_argument("--dataset", default="dataset.jsonl")
     parser.add_argument("--live", action="store_true",
                          help="Прогнать также кейсы, требующие реального Ollama-инференса")
+    parser.add_argument("--only", default="",
+                        help="Через запятую id кейсов, которые прогнать (например t13,t14)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="Сколько раз гонять каждый live-кейс (pass@k / pass^k)")
     args = parser.parse_args()
 
     cases = load_dataset(args.dataset)
+    if args.only:
+        wanted = {c.strip() for c in args.only.split(",")}
+        cases = [c for c in cases if c["id"] in wanted]
     report = EvalReport()
 
     graph_app = None

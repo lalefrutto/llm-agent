@@ -75,6 +75,24 @@ class LLMClient:
         self.last_usage = response.usage
         return response.choices[0].message
 
+    def chat_stream(self, messages: list[dict], model: str | None = None):
+        """Ответ потоком: генератор кусков текста (для веб-чата, см.
+        graph.finalize). usage последнего чанка сохраняется в last_usage."""
+        self.last_usage = None
+        stream = self._client.chat.completions.create(
+            model=model or self.config.model,
+            messages=messages,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                self.last_usage = chunk.usage
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
 
 if __name__ == "__main__":
     # Требует запущенный `ollama serve` и `ollama pull hermes3:8b-llama3.1-q4_K_M`

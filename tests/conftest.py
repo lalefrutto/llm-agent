@@ -16,6 +16,7 @@ os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 os.environ["MEMORY_BACKEND"] = "local"
 os.environ["CHECKPOINT_DB"] = str(TMP / "checkpoints.sqlite")
+os.environ["THREADS_DB"] = str(TMP / "threads.sqlite")
 os.environ["AGENT_WORKSPACE"] = str(TMP / "workspace")
 (TMP / "workspace").mkdir()
 os.environ.pop("LANGFUSE_PUBLIC_KEY", None)

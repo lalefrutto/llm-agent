@@ -32,12 +32,12 @@ from langgraph.graph import StateGraph, END
 
 from agent import metrics as M
 from agent import skills as skills_lib
-from agent.guardrails import irreversible_reason, is_confirmation
+from agent.guardrails import freshness_reason, irreversible_reason, is_confirmation
 from agent.llm_client import LLMClient
 from agent.tools import code_exec as code_exec_tool
 from agent.tools import file_ops as file_ops_tool
 from agent.tools import web_search as web_search_tool
-from memory.memory_manager import get_memory_backend, is_memory_worthy
+from memory.memory_manager import _FIRST_PERSON, get_memory_backend, memory_skip_reason
 
 # Langfuse (SDK v2, сервер langfuse/langfuse:2 из docker-compose). Если
 # ключи не заданы, декоратор @observe тихо отключается — код не меняется.
@@ -52,6 +52,7 @@ except ImportError:  # langfuse не установлен — no-op декора
 
 MAX_STEPS = 6  # guardrail против бесконечных циклов делегирования (см. prompts/system_prompt.md)
 MAX_TOOL_ITERS = 3  # сколько раундов tool-calling даём под-агенту на одну подзадачу
+MIN_MEMORY_SCORE = float(os.environ.get("MIN_MEMORY_SCORE", "0.5"))  # порог релевантности фактов из Mem0
 
 
 class AgentState(TypedDict):
@@ -71,6 +72,13 @@ class AgentState(TypedDict):
     action_confirmed: bool         # пользователь подтвердил pending_action в этом ходе
     blocked: str | None            # инструмент заблокирован политикой — граф сразу идёт в finalize
     skills_used: list[str]         # какие SKILL.md были подмешаны в промпты (для трейсов и evals)
+    route_reasoning: str           # обоснование последнего решения роутера (для трейса в UI)
+    last_skills: list[str]         # skills, подмешанные в последний вызов узла
+    memory_saved: bool             # отправлена ли реплика в долгосрочную память
+    memory_skip: str | None        # почему реплика не отправлена в память (для трейса)
+    trace: list[dict]              # пошаговый трейс запроса для веб-чата (см. _traced)
+    search_ok: bool                # web_search в этом запросе вернул хоть один результат
+    memory_debug: list[dict]       # все найденные факты со score и отметкой, прошли ли порог
 
 
 def _load_prompt(path: str) -> str:
@@ -120,18 +128,30 @@ with open("config/models.yaml", encoding="utf-8") as _f:
     ROLE_MODELS: dict[str, str] = (yaml.safe_load(_f) or {}).get("role_assignment", {})
 
 
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def _date_note() -> str:
+    """Текущая дата для промптов. Без неё модель считала «последней неделей»
+    время своего обучения и выдавала события 2023 года за свежие."""
+    now = time.localtime()
+    return (f"Сегодня {time.strftime('%Y-%m-%d', now)} ({_WEEKDAYS[now.tm_wday]}). "
+            "Твои знания из обучения устарели на годы: о событиях, версиях, ценах и курсах после "
+            "обучения ты ничего не знаешь — такие сведения бери только из результатов web_search.")
+
+
+def _base(prompt: str) -> str:
+    return SOUL + "\n\n" + _date_note() + "\n\n" + prompt
+
+
 def _model_for(role: str) -> str:
     """Модель для роли из config/models.yaml; AGENT_MODEL_OVERRIDE (env)
     принудительно переопределяет все роли (удобно для evals одной моделью)."""
     return os.environ.get("AGENT_MODEL_OVERRIDE") or ROLE_MODELS.get(role) or llm.config.model
 
 
-def _chat(node: str, messages: list[dict], **kw):
-    """Обёртка над llm.chat с метриками латентности/токенов по узлу графа
-    и generation-спаном в Langfuse."""
-    t0 = time.perf_counter()
-    reply = llm.chat(messages, **kw)
-    dt = time.perf_counter() - t0
+def _record_llm_call(node: str, messages: list[dict], output, dt: float, model: str | None) -> None:
+    """Метрики латентности/токенов по узлу графа и generation-спан в Langfuse."""
     M.LLM_LATENCY.labels(node=node).observe(dt)
     usage = llm.last_usage
     if usage is not None:
@@ -140,16 +160,55 @@ def _chat(node: str, messages: list[dict], **kw):
     if langfuse_context is not None:
         try:
             langfuse_context.update_current_observation(
-                model=kw.get("model") or llm.config.model,
+                model=model or llm.config.model,
                 input=messages,
-                output=reply.content if reply.content else [tc.model_dump() for tc in (reply.tool_calls or [])],
+                output=output,
                 usage={"input": getattr(usage, "prompt_tokens", 0), "output": getattr(usage, "completion_tokens", 0)}
                 if usage else None,
                 metadata={"node": node, "latency_s": round(dt, 3)},
             )
         except Exception:  # noqa: BLE001 — трейсинг не должен ронять граф
             pass
+
+
+def _chat(node: str, messages: list[dict], **kw):
+    t0 = time.perf_counter()
+    reply = llm.chat(messages, **kw)
+    _record_llm_call(node, messages,
+                     reply.content if reply.content else [tc.model_dump() for tc in (reply.tool_calls or [])],
+                     time.perf_counter() - t0, kw.get("model"))
     return reply
+
+
+# ---------------------------------------------------------------- stream ---
+# Потоковая выдача для веб-чата: шаги трейса уходят в браузер сразу после
+# узла, а финальный ответ — по мере генерации. Приёмник регистрируется на
+# время запроса по thread_id (run_request_stream); без приёмника граф
+# работает как раньше (API /chat, evals, тесты).
+_SINKS: dict = {}
+
+
+def _emit(state: AgentState, event: dict) -> None:
+    sink = _SINKS.get(state.get("thread_id"))
+    if sink is not None:
+        try:
+            sink(event)
+        except Exception:  # noqa: BLE001 — оборванное соединение не должно ронять граф
+            pass
+
+
+def _chat_text(node: str, messages: list[dict], state: AgentState, model: str) -> str:
+    """Текстовый ответ LLM; если на тред подписан веб-чат — потоком."""
+    if state.get("thread_id") not in _SINKS:
+        return _chat(node, messages, model=model).content or ""
+    t0 = time.perf_counter()
+    parts: list[str] = []
+    for piece in llm.chat_stream(messages, model=model):
+        parts.append(piece)
+        _emit(state, {"type": "token", "text": piece})
+    text = "".join(parts)
+    _record_llm_call(node, messages, text, time.perf_counter() - t0, model)
+    return text
 
 
 # ---------------------------------------------------------------- tools ---
@@ -247,6 +306,7 @@ def _with_skills(state: AgentState, agent: str, base_prompt: str, text: str) -> 
     """Подмешивает выбранные SKILL.md в системный промпт узла."""
     delegations = sum(1 for r in state.get("route_history") or [] if r.startswith("delegate_"))
     selected = skills_lib.select_skills(SKILLS, agent, text, delegations)
+    state["last_skills"] = [sk.name for sk in selected]
     for sk in selected:
         M.SKILLS_LOADED.labels(skill=sk.name, agent=agent).inc()
         if sk.name not in state.setdefault("skills_used", []):
@@ -293,6 +353,14 @@ def _unverified_numbers(output: str, calls: list[dict], subtask: str) -> list[st
 def retrieve_memory(state: AgentState) -> AgentState:
     last_user_msg = next((m["content"] for m in reversed(state["messages"]) if m["role"] == "user"), "")
     results = memory.search(state["user_id"], last_user_msg, top_k=5)
+    # Порог релевантности: поиск всегда возвращает top-k, даже если ничего
+    # похожего нет. С bge-m3 нужные факты набирают 0.57–0.69, а нерелевантные
+    # — до 0.48 (на «Привет, как дела?» не проходит ни один), см. memory_manager.
+    def score(r):  # у локального JSON-бэкенда score нет — такие факты не фильтруем
+        return getattr(r, "score", None)
+    state["memory_debug"] = [{"text": r.text, "score": None if score(r) is None else round(score(r), 2),
+                              "used": score(r) is None or score(r) >= MIN_MEMORY_SCORE} for r in results]
+    results = [r for r in results if score(r) is None or score(r) >= MIN_MEMORY_SCORE]
     # Mem0 2.x извлекает факты только аддитивно (без UPDATE/DELETE), поэтому
     # «живу в Москве» и «переехал в Петербург» хранятся рядом. Отдаём факты
     # в хронологическом порядке с датой — правило «новее = вернее» см. _memory_block.
@@ -316,6 +384,7 @@ def route(state: AgentState) -> AgentState:
     if state["step_count"] >= MAX_STEPS:
         M.MAX_STEPS_REACHED.inc()
         state["route"] = "finalize"
+        state["route_reasoning"] = f"достигнут лимит шагов MAX_STEPS={MAX_STEPS}"
         return state
 
     # Жёсткий guardrail: необратимое действие без подтверждения не доходит до LLM-роутера.
@@ -327,11 +396,12 @@ def route(state: AgentState) -> AgentState:
             state["route"] = "ask_user"
             state.setdefault("route_history", []).append("ask_user")
             M.ROUTE_DECISIONS.labels(action="ask_user").inc()
+            state["route_reasoning"] = f"guardrail в коде: {reason} — нужно подтверждение пользователя"
             state["step_count"] += 1
             return state
 
     messages = [
-        {"role": "system", "content": SOUL + "\n\n" + SYSTEM_PROMPT},
+        {"role": "system", "content": _base(SYSTEM_PROMPT)},
         {"role": "system", "content": _memory_block(state)},
         *state["messages"],
     ]
@@ -371,16 +441,30 @@ def route(state: AgentState) -> AgentState:
         decision = {"action": "answer_directly", "reasoning": "fallback: invalid routing JSON", "subtask": ""}
 
     state["route"] = decision.get("action", "answer_directly")
+    state["subtask"] = decision.get("subtask") or ""
+    state["route_reasoning"] = str(decision.get("reasoning") or "")
+
+    # Детерминированный guardrail поверх LLM-роутера: вопрос о свежих данных
+    # нельзя закрыть «знаниями модели» — если роутер решил ответить сам и
+    # поиска в этом запросе ещё не было, принудительно отправляем researcher'у.
+    fresh = freshness_reason(_last_user_msg(state))
+    if (fresh and state["route"] == "answer_directly"
+            and "delegate_researcher" not in (state.get("route_history") or [])):
+        M.GUARDRAIL_TRIGGERED.labels(reason="свежие данные").inc()
+        state["route_reasoning"] = (f"guardrail в коде: {fresh} — нужен веб-поиск "
+                                    f"(роутер хотел ответить сам: {state['route_reasoning'][:200]})")
+        state["route"] = "delegate_researcher"
+        state["subtask"] = _last_user_msg(state)
+
     state.setdefault("route_history", []).append(state["route"])
     M.ROUTE_DECISIONS.labels(action=state["route"]).inc()
-    state["subtask"] = decision.get("subtask") or ""
     state["step_count"] += 1
     return state
 
 
 @observe(name="researcher", as_type="generation")
 def run_researcher(state: AgentState) -> AgentState:
-    prompt = _with_skills(state, "researcher", SOUL + "\n\n" + RESEARCHER_PROMPT,
+    prompt = _with_skills(state, "researcher", _base(RESEARCHER_PROMPT),
                           _last_user_msg(state) + " " + state["subtask"])
     messages = [
         {"role": "system", "content": prompt},
@@ -391,6 +475,8 @@ def run_researcher(state: AgentState) -> AgentState:
         state["critic_feedback"] = None
     output, calls, blocked = _tool_loop("researcher", messages, [web_search_tool.TOOL_SCHEMA], _model_for("researcher"))
     state["subagent_result"] = {"agent": "researcher", "output": output, "tool_calls": calls}
+    if any(c["tool"] == "web_search" and c["result"].lstrip().startswith("[{") for c in calls):
+        state["search_ok"] = True
     if blocked:
         state["subagent_result"]["blocked"] = state["blocked"] = blocked
     return state
@@ -398,7 +484,7 @@ def run_researcher(state: AgentState) -> AgentState:
 
 @observe(name="executor", as_type="generation")
 def run_executor(state: AgentState) -> AgentState:
-    prompt = _with_skills(state, "executor", SOUL + "\n\n" + EXECUTOR_PROMPT,
+    prompt = _with_skills(state, "executor", _base(EXECUTOR_PROMPT),
                           _last_user_msg(state) + " " + state["subtask"])
     messages = [
         {"role": "system", "content": prompt},
@@ -451,7 +537,7 @@ def run_critic(state: AgentState) -> AgentState:
 @observe(name="finalize", as_type="generation")
 def finalize(state: AgentState) -> AgentState:
     context_block = json.dumps(state.get("subagent_result") or {}, ensure_ascii=False)[:6000]
-    prompt = _with_skills(state, "finalize", SOUL + "\n\n" + SYSTEM_PROMPT, _last_user_msg(state))
+    prompt = _with_skills(state, "finalize", _base(SYSTEM_PROMPT), _last_user_msg(state))
     messages = [
         {"role": "system", "content": prompt},
         {"role": "system", "content": _memory_block(state)},
@@ -486,15 +572,36 @@ def finalize(state: AgentState) -> AgentState:
             "Запрос пользователя — необратимое действие (" + str(irreversible_reason(state["pending_action"]))
             + "). Ты его НЕ выполнял. Кратко объясни, что именно будет сделано и чем это грозит, и попроси "
               "подтвердить ответом «да, подтверждаю» — без подтверждения действие не будет выполнено.")})
+    if freshness_reason(_last_user_msg(state)) and not state.get("search_ok"):
+        # Поиск не выполнялся или ничего не нашёл (DuckDuckGo без ключа иногда
+        # отвечает «No results found») — не подменяем его знаниями модели.
+        messages.append({"role": "system", "content": (
+            "Вопрос о свежих событиях или данных, а веб-поиск в этом запросе не дал результатов. "
+            "Честно скажи, что не удалось найти актуальную информацию, и предложи переформулировать запрос "
+            "или повторить позже. НЕ перечисляй события, версии, цены и даты из своих знаний — они устарели.")})
+    if _is_personal_question(_last_user_msg(state)):
+        # Наблюдалось вживую: «как зовут моего кота?» в новом треде, факта в
+        # памяти нет — модель уверенно ответила «Мурзилко».
+        messages.append({"role": "system", "content": (
+            "Пользователь спрашивает о себе. Отвечай ТОЛЬКО по фактам из памяти и истории этого диалога. "
+            "Если ответа там нет — прямо скажи, что не знаешь (пользователь ещё не говорил об этом), "
+            "и не угадывай.")})
     if state.get("blocked"):
         # Ответ по шаблону, без LLM: в живом прогоне финализатор при блокировке
         # написал «все файлы успешно удалены, резервная копия сохранена» —
         # инструкцию выше 8B-модель проигнорировала.
         state["final_answer"] = ("Действие не выполнено: вызов инструмента заблокирован политикой "
                                  "безопасности.\nПричина: " + state["blocked"])
+        _emit(state, {"type": "token", "text": state["final_answer"]})
     else:
-        reply = _chat("finalize", messages, model=_model_for("orchestrator"))
-        state["final_answer"] = reply.content
+        state["final_answer"] = _chat_text("finalize", messages, state, _model_for("orchestrator"))
+        if state["route"] == "ask_user" and state.get("pending_action") and not state.get("action_confirmed"):
+            # 8B-финализатор регулярно забывает фразу подтверждения (или просит
+            # другую, например «удалить файлы», которую guardrail не примет) —
+            # добавляем её программно.
+            suffix = "\n\nЧтобы выполнить это действие, ответьте одним сообщением: «да, подтверждаю»."
+            state["final_answer"] = (state["final_answer"] or "").rstrip() + suffix
+            _emit(state, {"type": "token", "text": suffix})
 
     # В долгосрочную память — только реплика пользователя: раньше уходила пара
     # «вопрос–ответ», и Mem0 сохранял факты о самом ассистенте («Assistant
@@ -502,9 +609,19 @@ def finalize(state: AgentState) -> AgentState:
     # прошлые галлюцинации агента. Вопросы и поручения до экстрактора тоже не
     # доходят: на них LLM внутри Mem0 сам отвечал и сохранял ответ как «факт».
     last_user_msg = _last_user_msg(state)
-    if is_memory_worthy(last_user_msg) and not is_confirmation(last_user_msg):
-        memory.add(state["user_id"], last_user_msg)
+    skip = "подтверждение действия" if is_confirmation(last_user_msg) else memory_skip_reason(last_user_msg)
+    state["memory_saved"] = skip is None
+    state["memory_skip"] = skip
+    if state["memory_saved"]:
+        # thread_id в метаданных — чтобы при удалении треда можно было забыть
+        # и факты из него (см. delete_thread, DELETE /threads/{id}).
+        memory.add(state["user_id"], last_user_msg, metadata={"thread_id": state["thread_id"]})
     return state
+
+
+def _is_personal_question(text: str) -> bool:
+    """Вопрос пользователя о самом себе («как меня зовут?», «где я живу?»)."""
+    return "?" in text and bool(_FIRST_PERSON.search(text))
 
 
 def _route_selector(state: AgentState) -> Literal["researcher", "executor", "critic", "finalize"]:
@@ -537,14 +654,100 @@ def _after_critic(state: AgentState) -> Literal["router", "finalize"]:
     return "router"
 
 
+# ---------------------------------------------------------------- trace ---
+# Пошаговый трейс запроса для веб-чата: под каждым ответом видно, какие факты
+# достала память, что и почему решил роутер, какие skills и инструменты
+# использовали под-агенты (с кодом и stdout), что сказал критик. Трейс
+# собирается обёрткой вокруг узлов, а не внутри них, — логика узлов не меняется.
+
+_TRACE_TEXT_LIMIT = 1500
+
+
+def _clip(text, limit: int = _TRACE_TEXT_LIMIT) -> str:
+    text = "" if text is None else str(text)
+    return text if len(text) <= limit else text[:limit] + " …"
+
+
+def _trace_tool_call(call: dict) -> dict:
+    """Вызов инструмента -> {tool, input, ok, output} для отображения."""
+    tool, args, raw = call["tool"], call.get("args") or {}, call.get("result") or ""
+    item = {"tool": tool,
+            "input": _clip(args.get("code") or args.get("query") or args.get("path") or json.dumps(args, ensure_ascii=False))}
+    try:
+        res = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        res = raw
+    if isinstance(res, dict) and "error" in res:
+        item.update(ok=False, output=_clip(res["error"]))
+    elif tool == "code_exec" and isinstance(res, dict):
+        out = (res.get("stdout") or "").rstrip()
+        err = (res.get("stderr") or "").rstrip()
+        item.update(ok=res.get("exit_code") == 0, exit_code=res.get("exit_code"),
+                    output=_clip(out + (("\n[stderr] " + err) if err else "")) or "(пустой stdout)")
+    elif tool == "web_search" and isinstance(res, list):
+        item.update(ok=True, output=_clip("\n".join(f"{r.get('title', '')} — {r.get('url', '')}" for r in res[:5])))
+    else:
+        item.update(ok=True, output=_clip(res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)))
+    return item
+
+
+def _trace_event(node: str, before: dict, state: AgentState) -> dict | None:
+    if node == "memory_retrieval":
+        return {"node": "memory", "facts": list(state["memory_context"]),
+                "scored": list(state.get("memory_debug") or []), "min_score": MIN_MEMORY_SCORE}
+    if node == "router":
+        if len(state.get("route_history") or []) == len(before["route_history"]):
+            return {"node": "router", "action": "finalize", "reasoning": state.get("route_reasoning", "")}
+        ev = {"node": "router", "action": state["route"], "reasoning": _clip(state.get("route_reasoning"), 600)}
+        if state["route"].startswith("delegate_"):
+            ev["subtask"] = _clip(state.get("subtask"), 600)
+        if state.get("route_reasoning", "").startswith("guardrail"):
+            ev["node"] = "guardrail"
+        return ev
+    if node in ("researcher", "executor"):
+        sr = state.get("subagent_result") or {}
+        ev = {"node": node, "skills": list(state.get("last_skills") or []),
+              "calls": [_trace_tool_call(c) for c in sr.get("tool_calls", [])],
+              "output": _clip(sr.get("output"), 800)}
+        if sr.get("blocked"):
+            ev["blocked"] = sr["blocked"]
+        if sr.get("unverified_numbers"):
+            ev["unverified"] = sr["unverified_numbers"]
+        return ev
+    if node == "critic":
+        v = state.get("critic_verdict") or {}
+        return {"node": "critic", "verdict": v.get("verdict"), "issues": [_clip(i, 400) for i in v.get("issues", [])],
+                "fix": _clip(v.get("suggested_fix"), 400), "auto": bool(v.get("auto"))}
+    if node == "finalize":
+        return {"node": "finalize", "skills": list(state.get("last_skills") or []),
+                "templated": bool(state.get("blocked")), "memory_saved": bool(state.get("memory_saved")),
+                "memory_skip": state.get("memory_skip")}
+    return None
+
+
+def _traced(node: str, fn):
+    def wrapper(state: AgentState) -> AgentState:
+        before = {"route_history": list(state.get("route_history") or [])}
+        state["last_skills"] = []
+        t0 = time.perf_counter()
+        state = fn(state)
+        ev = _trace_event(node, before, state)
+        if ev is not None:
+            ev["ms"] = round((time.perf_counter() - t0) * 1000)
+            state.setdefault("trace", []).append(ev)
+            _emit(state, {"type": "step", "event": ev})
+        return state
+    return wrapper
+
+
 def build_graph():
     graph = StateGraph(AgentState)
-    graph.add_node("memory_retrieval", retrieve_memory)
-    graph.add_node("router", route)
-    graph.add_node("researcher", run_researcher)
-    graph.add_node("executor", run_executor)
-    graph.add_node("critic", run_critic)
-    graph.add_node("finalize", finalize)
+    graph.add_node("memory_retrieval", _traced("memory_retrieval", retrieve_memory))
+    graph.add_node("router", _traced("router", route))
+    graph.add_node("researcher", _traced("researcher", run_researcher))
+    graph.add_node("executor", _traced("executor", run_executor))
+    graph.add_node("critic", _traced("critic", run_critic))
+    graph.add_node("finalize", _traced("finalize", finalize))
 
     graph.set_entry_point("memory_retrieval")
     graph.add_edge("memory_retrieval", "router")
@@ -584,6 +787,13 @@ def init_state(user_id: str, thread_id: str, user_message: str) -> AgentState:
         "action_confirmed": False,
         "blocked": None,
         "skills_used": [],
+        "route_reasoning": "",
+        "last_skills": [],
+        "memory_saved": False,
+        "memory_skip": None,
+        "trace": [],
+        "search_ok": False,
+        "memory_debug": [],
     }
 
 
@@ -629,6 +839,47 @@ def run_request(app, user_id: str, thread_id: str, user_message: str) -> AgentSt
         except Exception:  # noqa: BLE001
             pass
     return result
+
+
+def run_request_stream(app, user_id: str, thread_id: str, user_message: str, sink) -> AgentState:
+    """run_request, но события (шаги трейса и куски ответа) по ходу работы
+    передаются в sink(event)."""
+    _SINKS[thread_id] = sink
+    try:
+        return run_request(app, user_id, thread_id, user_message)
+    finally:
+        _SINKS.pop(thread_id, None)
+
+
+def delete_thread(app, user_id: str, thread_id: str, forget_memory: bool = False) -> int:
+    """Удалить историю треда из checkpointer'а. Долгосрочная память о
+    пользователе по умолчанию остаётся (как в обычных чат-ботах: факты
+    принадлежат пользователю, а не переписке); forget_memory=True стирает и
+    факты, извлечённые из этого треда. Возвращает число забытых фактов."""
+    app.checkpointer.delete_thread(thread_id)
+    return memory.forget_thread(user_id, thread_id) if forget_memory else 0
+
+
+def thread_history(app, thread_id: str) -> list[dict]:
+    """История треда из checkpointer'а для веб-чата: [{q, a, trace?}, ...].
+    В состоянии хранится окно сообщений (до 20 прошлых + текущее) и ответ на
+    последний ход; трейс сохраняется только для последнего хода — трейсы
+    ранних ходов веб-чат держит у себя (localStorage)."""
+    snap = app.get_state({"configurable": {"thread_id": thread_id}})
+    values = snap.values if snap else {}
+    msgs = list(values.get("messages") or [])
+    if values.get("final_answer"):
+        msgs.append({"role": "assistant", "content": values["final_answer"]})
+    turns: list[dict] = []
+    for m in msgs:
+        if m.get("role") == "user":
+            turns.append({"q": m.get("content", ""), "a": ""})
+        elif m.get("role") == "assistant" and turns and not turns[-1]["a"]:
+            turns[-1]["a"] = m.get("content", "")
+    if turns and values.get("trace"):
+        turns[-1].update(trace=values["trace"], route_history=values.get("route_history") or [],
+                         step_count=values.get("step_count", 0))
+    return turns
 
 
 if __name__ == "__main__":
