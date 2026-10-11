@@ -16,6 +16,8 @@
 #   - observability stack: Langfuse (LLM-нативные трейсы) + стандартный
 #     стек (OTel Collector -> Prometheus/Loki -> Grafana -> Alertmanager).
 
+# Версии образов закреплены (проверено: те же digest, что и у ранее работавших
+# :latest) — иначе через месяц стек мог подняться с другими версиями.
 services:
   agent-app:
     build:
@@ -63,7 +65,7 @@ services:
     networks: [agent_net]
 
   llm-engine:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.35.0
     ports:
       - "11435:11434"  # проброшен на 11435, т.к. на хосте уже работает нативный Ollama (11434)
     volumes:
@@ -83,7 +85,7 @@ services:
     networks: [agent_net]
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.19.1
     ports:
       - "6333:6333"
     volumes:
@@ -98,7 +100,7 @@ services:
 
   # --- Observability: LLM-нативный слой ---
   langfuse:
-    image: langfuse/langfuse:2
+    image: langfuse/langfuse:2.95.11
     ports:
       - "3000:3000"
     environment:
@@ -131,7 +133,7 @@ services:
     networks: [agent_net]
 
   langfuse-db:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     environment:
       - POSTGRES_USER=langfuse
       - POSTGRES_PASSWORD=langfuse
@@ -148,7 +150,7 @@ services:
 
   # --- Observability: стандартный стек (metrics/logs/traces/alerts) ---
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.161.0
     volumes:
       - ../observability/otel-collector-config.yaml:/etc/otelcol/config.yaml
     command: ["--config=/etc/otelcol/config.yaml"]
@@ -159,7 +161,7 @@ services:
     networks: [agent_net]
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0
     volumes:
       - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ../observability/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml
@@ -173,7 +175,7 @@ services:
     networks: [agent_net]
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.7.8
     ports:
       - "3100:3100"
     # образ loki — без shell и wget, exec-healthcheck невозможен (как и у otel-collector);
@@ -181,13 +183,14 @@ services:
     networks: [agent_net]
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.3
     ports:
       - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - ../observability/grafana:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana   # без тома Grafana заново накатывала миграции БД при каждом пересоздании
     depends_on: [prometheus, loki]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
@@ -197,7 +200,7 @@ services:
     networks: [agent_net]
 
   alertmanager:
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.34.1
     ports:
       - "9093:9093"
     volumes:
@@ -215,6 +218,7 @@ volumes:
   ollama_models:
   qdrant_data:
   langfuse_pg:
+  grafana_data:
 
 networks:
   agent_net:
