@@ -104,6 +104,7 @@ class MemoryItem:
     text: str
     created_at: float
     metadata: dict = field(default_factory=dict)
+    score: float | None = None    # косинусная близость к запросу (только из search)
 
 
 def _role_model(role: str, default: str = "atlas-hermes3-12k") -> str:
@@ -188,6 +189,9 @@ class LocalJSONMemoryStore:
         self._save(new_items)
         return True
 
+    def list(self, user_id: str) -> list[MemoryItem]:
+        return [MemoryItem(**i) for i in self._load() if i["user_id"] == user_id]
+
     def forget_thread(self, user_id: str, thread_id: str) -> int:
         """Удалить факты, извлечённые из сообщений этого треда."""
         items = self._load()
@@ -204,10 +208,15 @@ class Mem0Backend:
     запуска на машине разработчика/в Claude Code.
     """
 
-    # nomic-embed-text отдаёт 768-мерные векторы через нативный Ollama API
-    # (mem0 не обрезает их под Matryoshka) — Qdrant-коллекция и embedder
-    # должны быть согласованы на это же число, иначе insert падает.
-    EMBEDDING_DIMS = 768
+    # Эмбеддинги — мультиязычная bge-m3 (1024 dims) на CPU, см.
+    # config/ollama/bge-m3-cpu.Modelfile. Прежняя nomic-embed-text не понимала
+    # русские вопросы: на «как зовут моего кота?» мусорный факт «4 в степени
+    # 1/2 равно 2.0» получал 0.59, а правильный «cat is named Мурзум» — 0.55;
+    # у bge-m3 — 0.28 против 0.69. Размерность коллекции Qdrant и эмбеддера
+    # должна совпадать, поэтому у bge-m3 своя коллекция (старая — на 768).
+    EMBEDDING_DIMS = 1024
+    EMBED_MODEL = os.environ.get("MEM0_EMBED_MODEL", "atlas-bge-m3-cpu")
+    COLLECTION = os.environ.get("MEM0_COLLECTION", "mem0_bge_m3")
 
     def __init__(self, qdrant_url: str | None = None):
         try:
@@ -246,6 +255,7 @@ class Mem0Backend:
                 "config": {
                     "host": qdrant_url.split("://")[-1].split(":")[0],
                     "port": 6333,
+                    "collection_name": self.COLLECTION,
                     "embedding_model_dims": self.EMBEDDING_DIMS,
                 },
             },
@@ -259,7 +269,7 @@ class Mem0Backend:
             "embedder": {
                 "provider": "ollama",
                 "config": {
-                    "model": "nomic-embed-text",
+                    "model": self.EMBED_MODEL,
                     "ollama_base_url": ollama_base_url,
                     "embedding_dims": self.EMBEDDING_DIMS,
                 },
@@ -287,9 +297,18 @@ class Mem0Backend:
                 text=it.get("memory", ""),
                 created_at=_ts(it.get("created_at")),
                 metadata=it.get("metadata") or {},
+                score=it.get("score"),
             )
             for it in items
         ]
+
+    def list(self, user_id: str) -> list[MemoryItem]:
+        """Все факты пользователя (для экрана «что агент обо мне знает»)."""
+        raw = self._client.get_all(filters={"user_id": user_id}, top_k=1000)
+        items = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+        return [MemoryItem(id=it.get("id", ""), user_id=user_id, text=it.get("memory", ""),
+                           created_at=_ts(it.get("created_at")), metadata=it.get("metadata") or {})
+                for it in items]
 
     def update(self, item_id: str, new_text: str) -> bool:
         self._client.update(item_id, new_text)

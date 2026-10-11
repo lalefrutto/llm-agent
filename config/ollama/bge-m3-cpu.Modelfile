@@ -1,0 +1,8 @@
+# bge-m3 (мультиязычные эмбеддинги, 1024 dims) на CPU.
+#   ollama create atlas-bge-m3-cpu -f config/ollama/bge-m3-cpu.Modelfile
+# На RTX 4060 8 GB видеопамять занята почти целиком: atlas-hermes3-12k ~5.9 GB
+# + рабочий стол Windows ~1.3 GB. bge-m3 на GPU добавил бы ещё 0.6 GB, а при
+# ~7.5 GB уже ловили CUDA out of memory. Эмбеддинг короткой фразы на CPU —
+# десятки миллисекунд, этого достаточно.
+FROM bge-m3
+PARAMETER num_gpu 0
